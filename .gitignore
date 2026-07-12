@@ -1,4 +1,28 @@
+# Python
 venv/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Experiment artifacts
+*.log
+logs/
+outputs/
+runs/
+data/
+models/
+*.gguf
+
+# OS / editor
 .DS_Store
+.idea/
+.vscode/
