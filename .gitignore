@@ -18,7 +18,7 @@ __pycache__/
 logs/
 outputs/
 runs/
-data/
+data/*.json
 models/
 *.gguf
 
