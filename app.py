@@ -1,17 +1,12 @@
+from conversation import Conversation
 from llm import chat_with_model
-from prompts import SYSTEM_PROMPT
 
 
 def main() -> None:
-    messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        }
-    ]
+    conversation = Conversation()
 
     print("Local AI chat")
-    print("Enter /bye to exit.\n")
+    print("Enter /reset to clear the conversation, /bye to exit.\n")
 
     while True:
         user_message = input("You: ").strip()
@@ -23,28 +18,23 @@ def main() -> None:
             print("Chat finished.")
             break
 
-        messages.append(
-            {
-                "role": "user",
-                "content": user_message,
-            }
-        )
+        if user_message.lower() == "/reset":
+            conversation.reset()
+            print("Conversation cleared.\n")
+            continue
+
+        conversation.add_user_message(user_message)
 
         try:
-            assistant_message = chat_with_model(messages)
+            assistant_message = chat_with_model(conversation.messages)
         except Exception as error:
             print(f"\nApplication error: {error}\n")
 
             # Удаляем сообщение пользователя, поскольку ответа на него не получили.
-            messages.pop()
+            conversation.remove_last_message()
             continue
 
-        messages.append(
-            {
-                "role": "assistant",
-                "content": assistant_message,
-            }
-        )
+        conversation.add_assistant_message(assistant_message)
 
         print(f"\nQwen: {assistant_message}\n")
 
