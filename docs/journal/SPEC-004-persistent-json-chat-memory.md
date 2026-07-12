@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-004](../../specs/SPEC-004-Persistent-JSON-Chat-Memory.md)
 - **Date:** 2026-07-12
 - **Branch:** feature/SPEC-004-persistent-json-chat-memory
-- **Merge commit:** <short-sha>
+- **Merge commit:** 98a8266
 
 ## Hypothesis / intent
 Conversation history lived only in RAM, so restarts lost the dialogue. Persisting
