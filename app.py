@@ -1,6 +1,6 @@
 from config import CHAT_HISTORY_PATH
 from conversation import Conversation
-from llm import chat_with_model
+from llm import stream_chat_with_model
 from storage import JsonConversationStore
 
 
@@ -29,8 +29,19 @@ def main() -> None:
 
         conversation.add_user_message(user_message)
 
+        print("\nQwen: ", end="", flush=True)
+        response_parts: list[str] = []
+
         try:
-            assistant_message = chat_with_model(conversation.messages_for_model)
+            for chunk in stream_chat_with_model(conversation.messages_for_model):
+                print(chunk, end="", flush=True)
+                response_parts.append(chunk)
+        except KeyboardInterrupt:
+            print("\nGeneration interrupted.\n")
+
+            # Ответ не получен целиком — откатываем сообщение пользователя.
+            conversation.remove_last_message()
+            continue
         except Exception as error:
             print(f"\nApplication error: {error}\n")
 
@@ -38,10 +49,19 @@ def main() -> None:
             conversation.remove_last_message()
             continue
 
+        assistant_message = "".join(response_parts)
+
+        if not assistant_message:
+            print("\nApplication error: Model returned an empty response.\n")
+
+            # Пустой ответ считаем неуспешным — откатываем сообщение пользователя.
+            conversation.remove_last_message()
+            continue
+
         conversation.add_assistant_message(assistant_message)
         store.save(conversation.stored_messages)
 
-        print(f"\nQwen: {assistant_message}\n")
+        print("\n")
 
 
 if __name__ == "__main__":
