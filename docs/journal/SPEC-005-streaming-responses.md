@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-005](../../specs/SPEC-005-Streaming-Responses.md)
 - **Date:** 2026-07-13
 - **Branch:** feature/SPEC-005-streaming-responses
-- **Merge commit:** _(filled in after merge)_
+- **Merge commit:** c9e1d04
 
 ## Hypothesis / intent
 `chat_with_model()` blocked until Ollama finished generating, so the user stared
