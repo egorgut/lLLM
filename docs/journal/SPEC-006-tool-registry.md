@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-006](../../specs/SPEC-006-Tool-Registry.md)
 - **Date:** 2026-07-14
 - **Branch:** feature/SPEC-006-tool-registry
-- **Merge commit:** _pending merge into `main`_
+- **Merge commit:** 0f46ce9
 
 ## Hypothesis / intent
 Before the harness can execute tools (SPEC-007+: Python, SQL, MCP, agent loop), it
