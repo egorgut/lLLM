@@ -1,12 +1,122 @@
+import json
+
 from config import CHAT_HISTORY_PATH
 from conversation import Conversation
-from llm import stream_chat_with_model
+from llm import ModelResponse, ModelToolCall
 from storage import JsonConversationStore
+from tools import PYTHON_CALCULATE_SPEC, ToolExecutor, ToolRegistry, python_calculate
+
+
+class TurnError(Exception):
+    """A controlled failure that aborts the current turn with a clear message."""
+
+
+def build_executor() -> tuple[ToolRegistry, ToolExecutor]:
+    registry = ToolRegistry()
+    registry.register(PYTHON_CALCULATE_SPEC)
+    executor = ToolExecutor(registry)
+    executor.register_handler("python_calculate", python_calculate)
+    return registry, executor
+
+
+def render_tool_call(call: ModelToolCall) -> None:
+    print(f"\n[tool] {call.name}")
+    print(f"[args] {json.dumps(call.arguments, ensure_ascii=False)}")
+
+
+def render_tool_result(result: dict) -> None:
+    print(f"[result] {json.dumps(result, ensure_ascii=False)}")
+
+
+def stream_response(response: ModelResponse, parts: list[str]) -> None:
+    """Stream text to the CLI, printing the 'Qwen: ' prefix lazily.
+
+    The prefix appears only once real text arrives, so a turn that resolves to a
+    tool call (no text) never shows an empty 'Qwen:' line.
+    """
+
+    printed_prefix = False
+    for chunk in response.text_chunks():
+        if not printed_prefix:
+            print("\nQwen: ", end="", flush=True)
+            printed_prefix = True
+        print(chunk, end="", flush=True)
+        parts.append(chunk)
+
+
+def assistant_tool_message(call: ModelToolCall) -> dict:
+    """The temporary assistant message that records the tool call for the model."""
+
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": call.name, "arguments": call.arguments}}],
+    }
+
+
+def tool_result_message(call: ModelToolCall, result: dict) -> dict:
+    """The temporary tool-result message sent back to the model."""
+
+    return {
+        "role": "tool",
+        "tool_name": call.name,
+        "content": json.dumps(result, ensure_ascii=False),
+    }
+
+
+def run_turn(
+    conversation: Conversation, executor: ToolExecutor, tools: list[dict]
+) -> str:
+    """Run one user turn and return the final assistant answer.
+
+    Supports at most one tool execution. Raises TurnError (or lets other
+    exceptions propagate) when a complete final answer cannot be produced; the
+    caller is responsible for rolling back the user message.
+    """
+
+    first = ModelResponse(conversation.messages_for_model, tools)
+    parts: list[str] = []
+    stream_response(first, parts)
+
+    # No tool requested: this is a normal streamed text answer.
+    if not first.tool_calls:
+        message = "".join(parts)
+        if not message:
+            raise TurnError("Model returned an empty response.")
+        return message
+
+    if len(first.tool_calls) > 1:
+        raise TurnError("Multiple tool calls are not supported in SPEC-007.")
+
+    # One tool call: show it, execute it, and send the result back to the model.
+    call = first.tool_calls[0]
+    render_tool_call(call)
+    result = executor.execute(call.name, call.arguments)
+    render_tool_result(result)
+
+    second_messages = [
+        *conversation.messages_for_model,
+        assistant_tool_message(call),
+        tool_result_message(call, result),
+    ]
+    second = ModelResponse(second_messages, tools)
+    final_parts: list[str] = []
+    stream_response(second, final_parts)
+
+    if second.tool_calls:
+        raise TurnError("Additional tool calls are not supported in SPEC-007.")
+
+    final_message = "".join(final_parts)
+    if not final_message:
+        raise TurnError("Model returned an empty response.")
+    return final_message
 
 
 def main() -> None:
     store = JsonConversationStore(CHAT_HISTORY_PATH)
     conversation = Conversation(messages=store.load())
+    registry, executor = build_executor()
+    tools = registry.to_ollama_tools()
 
     print("Local AI chat")
     print("Enter /reset to clear the conversation, /bye to exit.\n")
@@ -29,32 +139,18 @@ def main() -> None:
 
         conversation.add_user_message(user_message)
 
-        print("\nQwen: ", end="", flush=True)
-        response_parts: list[str] = []
-
         try:
-            for chunk in stream_chat_with_model(conversation.messages_for_model):
-                print(chunk, end="", flush=True)
-                response_parts.append(chunk)
+            assistant_message = run_turn(conversation, executor, tools)
         except KeyboardInterrupt:
             print("\nGeneration interrupted.\n")
 
-            # Ответ не получен целиком — откатываем сообщение пользователя.
+            # Turn did not complete — roll back the user message.
             conversation.remove_last_message()
             continue
         except Exception as error:
             print(f"\nApplication error: {error}\n")
 
-            # Удаляем сообщение пользователя, поскольку ответа на него не получили.
-            conversation.remove_last_message()
-            continue
-
-        assistant_message = "".join(response_parts)
-
-        if not assistant_message:
-            print("\nApplication error: Model returned an empty response.\n")
-
-            # Пустой ответ считаем неуспешным — откатываем сообщение пользователя.
+            # No complete answer was produced — roll back the user message.
             conversation.remove_last_message()
             continue
 
