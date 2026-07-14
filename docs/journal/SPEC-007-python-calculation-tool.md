@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-007](../../specs/SPEC-007-Python-Calculation-Tool.md)
 - **Date:** 2026-07-14
 - **Branch:** feature/SPEC-007-python-calculation-tool
-- **Merge commit:** <short-sha>
+- **Merge commit:** 87beb0a
 
 ## Hypothesis / intent
 SPEC-006 gave the harness a contract-only tool layer (`ToolSpec` + `ToolRegistry`)
