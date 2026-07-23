@@ -11,6 +11,11 @@ MAX_CONTEXT_MESSAGES = 20
 # Where the persistent conversation history is stored.
 CHAT_HISTORY_PATH = "data/chat_history.json"
 
+# Bounded agent loop (SPEC-010). The maximum number of tool executions the model
+# may drive within a single user turn. It is a host-owned safety limit: the model
+# can never read or change it, and a request beyond this count is not executed.
+MAX_TOOL_CALLS_PER_TURN = 4
+
 # Local Chinook SQLite database (SPEC-008). Resolved relative to this file so the
 # paths hold regardless of the current working directory. The seed script is the
 # trusted source under version control; the runtime database is generated from it
