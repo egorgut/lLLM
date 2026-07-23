@@ -22,6 +22,11 @@ data/*.json
 models/
 *.gguf
 
+# Generated runtime SQLite database (rebuild with scripts/init_database.py).
+# The seed script under data/seed/ stays tracked.
+data/chinook.sqlite
+data/.chinook.sqlite.*.tmp
+
 # OS / editor
 .DS_Store
 .idea/
