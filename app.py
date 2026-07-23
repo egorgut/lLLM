@@ -1,6 +1,12 @@
 import json
 
-from config import CHAT_HISTORY_PATH, MCP_SERVERS, SQLITE_DATABASE_PATH
+from agent import AgentRunner
+from config import (
+    CHAT_HISTORY_PATH,
+    MAX_TOOL_CALLS_PER_TURN,
+    MCP_SERVERS,
+    SQLITE_DATABASE_PATH,
+)
 from conversation import Conversation
 from llm import ModelResponse, ModelToolCall
 from mcp_integration import McpClientManager, McpStartupError
@@ -13,10 +19,6 @@ from tools import (
     create_sql_query_handler,
     python_calculate,
 )
-
-
-class TurnError(Exception):
-    """A controlled failure that aborts the current turn with a clear message."""
 
 
 def build_executor() -> tuple[ToolRegistry, ToolExecutor]:
@@ -61,97 +63,30 @@ def _server_for(model_facing_name: str) -> str:
     return "?"
 
 
-def render_tool_call(call: ModelToolCall) -> None:
-    print(f"\n[tool] {call.name}")
-    print(f"[args] {json.dumps(call.arguments, ensure_ascii=False)}")
+class CliRenderer:
+    """Renders agent-loop output to the terminal.
 
-
-def render_tool_result(result: dict) -> None:
-    print(f"[result] {json.dumps(result, ensure_ascii=False)}")
-
-
-def stream_response(response: ModelResponse, parts: list[str]) -> None:
-    """Stream text to the CLI, printing the 'Qwen: ' prefix lazily.
-
-    The prefix appears only once real text arrives, so a turn that resolves to a
-    tool call (no text) never shows an empty 'Qwen:' line.
+    Holds the one bit of per-turn state the loop needs: whether the lazy
+    ``Qwen: `` prefix has been printed yet, so it appears exactly once, only when
+    real final-answer text arrives. A turn that resolves entirely through tool
+    calls never shows an empty ``Qwen:`` line.
     """
 
-    printed_prefix = False
-    for chunk in response.text_chunks():
-        if not printed_prefix:
+    def __init__(self) -> None:
+        self._printed_prefix = False
+
+    def tool_call(self, call: ModelToolCall, used: int, maximum: int) -> None:
+        print(f"\n[tool {used}/{maximum}] {call.name}")
+        print(f"[args] {json.dumps(call.arguments, ensure_ascii=False)}")
+
+    def tool_result(self, result: dict) -> None:
+        print(f"[result] {json.dumps(result, ensure_ascii=False)}")
+
+    def text(self, chunk: str) -> None:
+        if not self._printed_prefix:
             print("\nQwen: ", end="", flush=True)
-            printed_prefix = True
+            self._printed_prefix = True
         print(chunk, end="", flush=True)
-        parts.append(chunk)
-
-
-def assistant_tool_message(call: ModelToolCall) -> dict:
-    """The temporary assistant message that records the tool call for the model."""
-
-    return {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{"function": {"name": call.name, "arguments": call.arguments}}],
-    }
-
-
-def tool_result_message(call: ModelToolCall, result: dict) -> dict:
-    """The temporary tool-result message sent back to the model."""
-
-    return {
-        "role": "tool",
-        "tool_name": call.name,
-        "content": json.dumps(result, ensure_ascii=False),
-    }
-
-
-def run_turn(
-    conversation: Conversation, executor: ToolExecutor, tools: list[dict]
-) -> str:
-    """Run one user turn and return the final assistant answer.
-
-    Supports at most one tool execution. Raises TurnError (or lets other
-    exceptions propagate) when a complete final answer cannot be produced; the
-    caller is responsible for rolling back the user message.
-    """
-
-    first = ModelResponse(conversation.messages_for_model, tools)
-    parts: list[str] = []
-    stream_response(first, parts)
-
-    # No tool requested: this is a normal streamed text answer.
-    if not first.tool_calls:
-        message = "".join(parts)
-        if not message:
-            raise TurnError("Model returned an empty response.")
-        return message
-
-    if len(first.tool_calls) > 1:
-        raise TurnError("Multiple tool calls are not supported.")
-
-    # One tool call: show it, execute it, and send the result back to the model.
-    call = first.tool_calls[0]
-    render_tool_call(call)
-    result = executor.execute(call.name, call.arguments)
-    render_tool_result(result)
-
-    second_messages = [
-        *conversation.messages_for_model,
-        assistant_tool_message(call),
-        tool_result_message(call, result),
-    ]
-    second = ModelResponse(second_messages, tools)
-    final_parts: list[str] = []
-    stream_response(second, final_parts)
-
-    if second.tool_calls:
-        raise TurnError("Additional tool calls are not supported after a tool result.")
-
-    final_message = "".join(final_parts)
-    if not final_message:
-        raise TurnError("Model returned an empty response.")
-    return final_message
 
 
 def main() -> None:
@@ -203,8 +138,21 @@ def main() -> None:
 
             conversation.add_user_message(user_message)
 
+            # A fresh renderer per turn resets the lazy 'Qwen:' prefix state. The
+            # runner drives the bounded model->tool->model loop over a snapshot of
+            # the model-facing messages; it never sees the mutable Conversation.
+            runner = AgentRunner(
+                respond=lambda messages, declarations: ModelResponse(
+                    messages, declarations
+                ),
+                executor=executor,
+                tools=tools,
+                max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+                renderer=CliRenderer(),
+            )
+
             try:
-                assistant_message = run_turn(conversation, executor, tools)
+                assistant_message = runner.run_turn(conversation.messages_for_model)
             except KeyboardInterrupt:
                 print("\nGeneration interrupted.\n")
 
