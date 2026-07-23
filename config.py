@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 OLLAMA_HOST = "http://localhost:11434"
@@ -17,3 +18,16 @@ CHAT_HISTORY_PATH = "data/chat_history.json"
 PROJECT_ROOT = Path(__file__).resolve().parent
 CHINOOK_SEED_PATH = PROJECT_ROOT / "data" / "seed" / "Chinook_Sqlite.sql"
 SQLITE_DATABASE_PATH = PROJECT_ROOT / "data" / "chinook.sqlite"
+
+# Local MCP servers launched by the host over stdio (SPEC-009). Each entry is a
+# child process the harness starts; the command, arguments, and environment are
+# controlled here by the developer and can never be supplied by the model or by
+# chat input. `sys.executable` runs the child in the same virtual environment as
+# this app, and the script path is resolved from PROJECT_ROOT so it holds
+# regardless of the current working directory.
+MCP_SERVERS = {
+    "time": {
+        "command": sys.executable,
+        "args": [str(PROJECT_ROOT / "mcp_servers" / "time_server.py")],
+    },
+}
