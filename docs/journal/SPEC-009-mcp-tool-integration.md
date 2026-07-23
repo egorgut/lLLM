@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-009](../../specs/SPEC-009-MCP-Tool-Integration.md)
 - **Date:** 2026-07-23
 - **Branch:** feature/SPEC-009-mcp-tool-integration
-- **Merge commit:** _(filled after merge)_
+- **Merge commit:** 7115109
 
 ## Hypothesis / intent
 SPEC-006–008 built a unified registry/executor where every tool is a local
