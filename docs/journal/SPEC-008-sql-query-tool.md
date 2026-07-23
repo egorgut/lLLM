@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-008](../../specs/SPEC-008-SQL-Query-Tool.md)
 - **Date:** 2026-07-23
 - **Branch:** feature/SPEC-008-sql-query-tool
-- **Merge commit:** _(filled after merge)_
+- **Merge commit:** 6b195b3
 
 ## Hypothesis / intent
 SPEC-007 wired the complete one-tool-per-turn path with a single in-process
