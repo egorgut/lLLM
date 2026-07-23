@@ -67,15 +67,57 @@ Qwen: The result of 173 multiplied by 284 is 49,132.
 поддерживается **ровно один** вызов инструмента. Если инструмент не нужен, модель
 отвечает как обычно, без блока `[tool]`.
 
+### Инструмент `sql_query`
+
+Второй исполняемый инструмент — `sql_query` — даёт модели **только чтение** из
+локальной SQLite-базы [Chinook](https://github.com/lerocha/chinook-database)
+(демонстрационный музыкальный магазин: артисты, альбомы, треки, клиенты,
+сотрудники, счета). Модель получает схему базы в системном промпте, генерирует
+**один** `SELECT` (можно с `WITH`), harness исполняет его локально через
+стандартный модуль `sqlite3` и возвращает строки модели для финального ответа.
+
+База не хранится в git — её нужно один раз собрать из доверенного seed-скрипта
+`data/seed/Chinook_Sqlite.sql`:
+
+```bash
+python scripts/init_database.py          # создаёт data/chinook.sqlite
+python scripts/init_database.py --force   # пересоздать существующую базу
+```
+
+Если база не инициализирована, инструмент вернёт ошибку
+`database_not_initialized` — запусти команду выше. Внешний сервер БД не нужен,
+сеть не используется. Пример вызова в CLI:
+
+```text
+You: Which five genres generated the most revenue?
+
+[tool] sql_query
+[args] {"query": "SELECT g.Name, SUM(il.UnitPrice * il.Quantity) AS Revenue FROM InvoiceLine il JOIN Track t ON il.TrackId = t.TrackId JOIN Genre g ON t.GenreId = g.GenreId GROUP BY g.Name ORDER BY Revenue DESC LIMIT 5"}
+[result] {"ok": true, "columns": ["Name", "Revenue"], "rows": [["Rock", 826.65], ...], "row_count": 5, "truncated": false}
+
+Qwen: The five genres that generated the most revenue are Rock ($826.65)...
+```
+
+Защита выстроена на границе соединения, а не разбором SQL: соединение
+открывается в режиме `mode=ro`, SQLite-authorizer отклоняет всё, кроме чтения
+(записи, DDL, `ATTACH`, `PRAGMA`, транзакции), исполняется **ровно один**
+оператор через `execute` (не `executescript`), а число строк, столбцов, объём
+результата и работа движка ограничены детерминированными лимитами. За один ход —
+**один** вызов инструмента; результат матируется по строкам, если он слишком
+большой (`truncated: true`).
+
 ## Конфигурация
 
-Настройки хоста и модели — в `config.py`:
+Настройки хоста, модели и путей к БД — в `config.py`:
 
 ```python
 OLLAMA_HOST = "http://localhost:11434"
 MODEL_NAME = "qwen3:8b"
 MAX_CONTEXT_MESSAGES = 20              # сколько последних сообщений уходит модели
 CHAT_HISTORY_PATH = "data/chat_history.json"  # где хранится история
+
+CHINOOK_SEED_PATH = ...     # доверенный seed под контролем версий
+SQLITE_DATABASE_PATH = ...  # сгенерированная база (в git не хранится)
 ```
 
 ## Структура
@@ -88,7 +130,9 @@ CHAT_HISTORY_PATH = "data/chat_history.json"  # где хранится исто
 | `llm.py`          | Клиент Ollama и вызов модели                             |
 | `prompts.py`      | Системный промпт                                         |
 | `config.py`       | Хост Ollama и имя модели                                 |
-| `tools/`          | Инструменты: реестр (`ToolSpec`/`ToolRegistry`), исполнитель (`ToolExecutor`) и `python_calculate` |
+| `tools/`          | Инструменты: реестр (`ToolSpec`/`ToolRegistry`), исполнитель (`ToolExecutor`), `python_calculate` и `sql_query` |
+| `scripts/`        | Утилиты: `init_database.py` — сборка Chinook SQLite из seed |
+| `data/seed/`      | Доверенный seed-скрипт Chinook (`Chinook_Sqlite.sql`)     |
 | `specs/`          | Спеки итераций (SPEC-NNN) — намерение каждого шага        |
 | `docs/journal/`   | Журнал итераций: что менялось и как вела себя модель      |
 
@@ -110,7 +154,8 @@ CHAT_HISTORY_PATH = "data/chat_history.json"  # где хранится исто
 `tools/` содержит `ToolSpec` (контракт инструмента: имя, описание, схемы входа и
 выхода), `ToolRegistry` (реестр — регистрация с валидацией, поиск по имени,
 генерация деклараций function-tool для Ollama) и `ToolExecutor` (привязка имени к
-обработчику и диспетчеризация). Появился и первый исполняемый инструмент —
-`python_calculate` (ограниченный калькулятор, см. выше). Полноценный agent-loop с
-несколькими вызовами за ход, а также SQL/MCP-инструменты появятся в следующих
-шагах.
+обработчику и диспетчеризация). Доступны два исполняемых инструмента —
+`python_calculate` (ограниченный калькулятор) и `sql_query` (только чтение из
+локальной Chinook SQLite, см. выше). За один ход по-прежнему исполняется **один**
+инструмент. Полноценный agent-loop с несколькими вызовами за ход, само-коррекция
+SQL и MCP-инструменты появятся в следующих шагах.

@@ -1,10 +1,17 @@
 import json
 
-from config import CHAT_HISTORY_PATH
+from config import CHAT_HISTORY_PATH, SQLITE_DATABASE_PATH
 from conversation import Conversation
 from llm import ModelResponse, ModelToolCall
 from storage import JsonConversationStore
-from tools import PYTHON_CALCULATE_SPEC, ToolExecutor, ToolRegistry, python_calculate
+from tools import (
+    PYTHON_CALCULATE_SPEC,
+    SQL_QUERY_SPEC,
+    ToolExecutor,
+    ToolRegistry,
+    create_sql_query_handler,
+    python_calculate,
+)
 
 
 class TurnError(Exception):
@@ -14,8 +21,10 @@ class TurnError(Exception):
 def build_executor() -> tuple[ToolRegistry, ToolExecutor]:
     registry = ToolRegistry()
     registry.register(PYTHON_CALCULATE_SPEC)
+    registry.register(SQL_QUERY_SPEC)
     executor = ToolExecutor(registry)
     executor.register_handler("python_calculate", python_calculate)
+    executor.register_handler("sql_query", create_sql_query_handler(SQLITE_DATABASE_PATH))
     return registry, executor
 
 
@@ -86,7 +95,7 @@ def run_turn(
         return message
 
     if len(first.tool_calls) > 1:
-        raise TurnError("Multiple tool calls are not supported in SPEC-007.")
+        raise TurnError("Multiple tool calls are not supported.")
 
     # One tool call: show it, execute it, and send the result back to the model.
     call = first.tool_calls[0]
@@ -104,7 +113,7 @@ def run_turn(
     stream_response(second, final_parts)
 
     if second.tool_calls:
-        raise TurnError("Additional tool calls are not supported in SPEC-007.")
+        raise TurnError("Additional tool calls are not supported after a tool result.")
 
     final_message = "".join(final_parts)
     if not final_message:
