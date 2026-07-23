@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-010](../../specs/SPEC-010-Agent-Loop.md)
 - **Date:** 2026-07-23
 - **Branch:** feature/SPEC-010-agent-loop
-- **Merge commit:** <pending>
+- **Merge commit:** cf0904b
 
 ## Hypothesis / intent
 SPEC-006–009 built a unified registry/executor serving local + MCP tools, but a
