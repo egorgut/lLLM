@@ -4,10 +4,15 @@ from typing import Any
 
 from ollama import Client
 
-from config import MODEL_NAME, OLLAMA_HOST
+from config import MODEL_NAME, MODEL_REQUEST_TIMEOUT_SECONDS, OLLAMA_HOST
 
-
-client = Client(host=OLLAMA_HOST)
+# A component-native defense-in-depth floor (SPEC-011 §14): the installed SDK
+# (0.6.2) maps this to httpx's connect/read/write/pool timeouts, which bound
+# inactivity between chunks but not the total duration of a long, continuously
+# streaming response. The authoritative bound on one full model decision is
+# the caller-side deadline `agent.py` applies around the whole streaming
+# exchange (`reliability.run_with_deadline`), not this client setting.
+client = Client(host=OLLAMA_HOST, timeout=MODEL_REQUEST_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True)

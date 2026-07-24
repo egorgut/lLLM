@@ -1,0 +1,179 @@
+[
+  {
+    "id": "no-tool-basic-001",
+    "category": "no_tool_answer",
+    "modes": ["scripted", "live"],
+    "prompt": "In one sentence, what is an agent loop?",
+    "script": [
+      {"text": "An agent loop repeatedly lets a model choose a tool or a final answer until it answers."}
+    ],
+    "expectation": {
+      "status": "completed",
+      "reason": "final_answer",
+      "allowed_tools": [],
+      "max_tool_calls": 0
+    }
+  },
+  {
+    "id": "calc-basic-001",
+    "category": "calculator",
+    "modes": ["scripted", "live"],
+    "prompt": "What is 173 multiplied by 284? Reply with the number.",
+    "script": [
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "173 * 284"}}},
+      {"text": "The result is 49132."}
+    ],
+    "tool_results": {
+      "python_calculate": {"ok": true, "result": 49132}
+    },
+    "expectation": {
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["python_calculate"],
+      "max_tool_calls": 1,
+      "answer_matches": "49,?132"
+    }
+  },
+  {
+    "id": "sql-basic-001",
+    "category": "sql_single_query",
+    "modes": ["scripted", "live"],
+    "prompt": "How many tracks are in the Chinook database? Reply with the number.",
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT COUNT(*) FROM Track"}}},
+      {"text": "There are 3503 tracks in the database."}
+    ],
+    "tool_results": {
+      "sql_query": {"ok": true, "columns": ["COUNT(*)"], "rows": [[3503]]}
+    },
+    "expectation": {
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["sql_query"],
+      "max_tool_calls": 1,
+      "answer_matches": "3503"
+    }
+  },
+  {
+    "id": "sql-recovery-001",
+    "category": "sql_recovery",
+    "modes": ["scripted"],
+    "prompt": "Query the Track table for the count of rows (the harness forces one bad query first).",
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT COUNT(*) FROM NoSuchTable"}}},
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT COUNT(*) FROM Track"}}},
+      {"text": "There are 3503 tracks in the database."}
+    ],
+    "tool_results": {
+      "sql_query": [
+        {"ok": false, "error": {"type": "sql_no_such_table", "message": "no such table: NoSuchTable"}},
+        {"ok": true, "columns": ["COUNT(*)"], "rows": [[3503]]}
+      ]
+    },
+    "expectation": {
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["sql_query"],
+      "min_tool_calls": 2,
+      "max_tool_calls": 2
+    }
+  },
+  {
+    "id": "multi-tool-001",
+    "category": "multi_tool",
+    "modes": ["scripted", "live"],
+    "prompt": "How many employees are in the database, multiplied by 12? Reply with the number.",
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT COUNT(*) FROM Employee"}}},
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "12 * 8"}}},
+      {"text": "The result is 96."}
+    ],
+    "tool_results": {
+      "sql_query": {"ok": true, "columns": ["COUNT(*)"], "rows": [[8]]},
+      "python_calculate": {"ok": true, "result": 96}
+    },
+    "expectation": {
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["sql_query", "python_calculate"],
+      "min_tool_calls": 2,
+      "max_tool_calls": 2,
+      "answer_matches": "96"
+    }
+  },
+  {
+    "id": "mcp-time-001",
+    "category": "mcp_time",
+    "modes": ["scripted", "live"],
+    "prompt": "What time is it right now in Europe/Amsterdam?",
+    "script": [
+      {"tool_call": {"name": "mcp_time__get_current_time", "arguments": {"timezone": "Europe/Amsterdam"}}},
+      {"text": "It is currently 10:15 in Europe/Amsterdam."}
+    ],
+    "tool_results": {
+      "mcp_time__get_current_time": {"ok": true, "datetime": "2026-07-24T10:15:00+02:00"}
+    },
+    "expectation": {
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["mcp_time__get_current_time"],
+      "max_tool_calls": 1
+    }
+  },
+  {
+    "id": "repetition-guard-001",
+    "category": "repetition_guard",
+    "modes": ["scripted"],
+    "prompt": "(scripted harness policy check; not sent to a live model)",
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT 1"}}},
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT 1"}}},
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT 1"}}}
+    ],
+    "tool_results": {
+      "sql_query": {"ok": true, "columns": ["1"], "rows": [[1]]}
+    },
+    "expectation": {
+      "status": "stopped",
+      "reason": "repeated_tool_call",
+      "max_tool_calls": 2
+    }
+  },
+  {
+    "id": "budget-guard-001",
+    "category": "tool_call_budget_guard",
+    "modes": ["scripted"],
+    "prompt": "(scripted harness policy check; not sent to a live model)",
+    "script": [
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "0"}}},
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "1"}}},
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "2"}}},
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "3"}}},
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "4"}}}
+    ],
+    "tool_results": {
+      "python_calculate": {"ok": true, "result": 0}
+    },
+    "expectation": {
+      "status": "stopped",
+      "reason": "tool_call_limit",
+      "max_tool_calls": 4
+    }
+  },
+  {
+    "id": "timeout-scripted-001",
+    "category": "timeout",
+    "modes": ["scripted"],
+    "prompt": "(scripted harness timeout check; not sent to a live model)",
+    "script": [
+      {"block": true}
+    ],
+    "runner_overrides": {
+      "model_request_timeout_seconds": 0.05
+    },
+    "expectation": {
+      "status": "timed_out",
+      "reason": "model_timeout"
+    }
+  }
+]

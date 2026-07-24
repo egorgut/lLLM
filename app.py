@@ -1,15 +1,24 @@
 import json
+import time
 
 from agent import AgentRunner
 from config import (
+    AGENT_TURN_TIMEOUT_SECONDS,
     CHAT_HISTORY_PATH,
+    MAX_IDENTICAL_TOOL_CALLS,
     MAX_TOOL_CALLS_PER_TURN,
     MCP_SERVERS,
+    MODEL_NAME,
+    MODEL_REQUEST_TIMEOUT_SECONDS,
     SQLITE_DATABASE_PATH,
+    TOOL_EXECUTION_TIMEOUT_SECONDS,
+    TRACE_ENABLED,
+    TRACE_PATH,
 )
 from conversation import Conversation
 from llm import ModelResponse, ModelToolCall
 from mcp_integration import McpClientManager, McpStartupError
+from reliability import TurnStatus, new_id
 from storage import JsonConversationStore
 from tools import (
     PYTHON_CALCULATE_SPEC,
@@ -19,6 +28,7 @@ from tools import (
     create_sql_query_handler,
     python_calculate,
 )
+from tracing import JsonlTraceSink, NullTraceSink, SafeTraceSink, build_event
 
 
 def build_executor() -> tuple[ToolRegistry, ToolExecutor]:
@@ -90,30 +100,42 @@ class CliRenderer:
 
 
 def main() -> None:
+    # One run_id identifies this whole process; a fresh turn_id correlates
+    # every trace event and CLI diagnostic for one user turn (SPEC-011 §3).
+    run_id = new_id()
+    sink = JsonlTraceSink(TRACE_PATH) if TRACE_ENABLED else NullTraceSink()
+    trace_sink = SafeTraceSink(sink, run_id)
+    run_started_at = time.monotonic()
+    trace_sink.emit(
+        build_event("run_started", run_id=run_id, model_name=MODEL_NAME, app_version=None)
+    )
+
     store = JsonConversationStore(CHAT_HISTORY_PATH)
     conversation = Conversation(messages=store.load())
     registry, executor = build_executor()
 
     # MCP tool discovery is fail-fast and happens before the chat loop. If a
     # server cannot be launched, initialized, or queried, report it clearly (no
-    # traceback) and exit without leaving a child process behind.
-    manager = McpClientManager(MCP_SERVERS)
-    try:
-        manager.start()
-        register_mcp_tools(registry, executor, manager)
-    except McpStartupError as error:
-        manager.close()
-        print(f"MCP startup failed for server '{error.server_id}': {error}")
-        raise SystemExit(1)
-
-    tools = registry.to_ollama_tools()
-    for summary in manager.server_summaries():
-        print(f"[mcp] connected: {summary}")
-
-    print("Local AI chat")
-    print("Enter /reset to clear the conversation, /bye to exit.\n")
+    # traceback) and exit without leaving a child process behind. The manager's
+    # own per-call timeout is host-owned, matching the tool-execution deadline
+    # AgentRunner enforces around every call (mcp_integration/client.py).
+    manager = McpClientManager(MCP_SERVERS, call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS)
 
     try:
+        try:
+            manager.start()
+            register_mcp_tools(registry, executor, manager)
+        except McpStartupError as error:
+            print(f"MCP startup failed for server '{error.server_id}': {error}")
+            raise SystemExit(1)
+
+        tools = registry.to_ollama_tools()
+        for summary in manager.server_summaries():
+            print(f"[mcp] connected: {summary}")
+
+        print("Local AI chat")
+        print("Enter /reset to clear the conversation, /bye to exit.\n")
+
         while True:
             # Ctrl+D (EOF) or Ctrl+C at the prompt ends the session cleanly and
             # falls through to the guaranteed MCP shutdown below.
@@ -137,6 +159,7 @@ def main() -> None:
                 continue
 
             conversation.add_user_message(user_message)
+            turn_id = new_id()
 
             # A fresh renderer per turn resets the lazy 'Qwen:' prefix state. The
             # runner drives the bounded model->tool->model loop over a snapshot of
@@ -147,33 +170,52 @@ def main() -> None:
                 ),
                 executor=executor,
                 tools=tools,
-                max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
                 renderer=CliRenderer(),
+                run_id=run_id,
+                max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+                max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
+                model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+                tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+                trace_sink=trace_sink,
             )
 
             try:
-                assistant_message = runner.run_turn(conversation.messages_for_model)
-            except KeyboardInterrupt:
-                print("\nGeneration interrupted.\n")
-
-                # Turn did not complete — roll back the user message.
+                outcome = runner.run_turn(conversation.messages_for_model, turn_id=turn_id)
+            except Exception:
+                # A safety net beyond AgentRunner's own internal_error
+                # conversion: the terminal trace event is already guaranteed by
+                # run_turn itself before this exception reaches us.
+                print(
+                    "\nApplication error: Unexpected application error.\n"
+                    f"Run ID: {turn_id}\n"
+                )
                 conversation.remove_last_message()
                 continue
-            except Exception as error:
-                print(f"\nApplication error: {error}\n")
 
-                # No complete answer was produced — roll back the user message.
+            if outcome.status is TurnStatus.COMPLETED:
+                conversation.add_assistant_message(outcome.final_text)
+                store.save(conversation.stored_messages)
+            elif outcome.status is TurnStatus.CANCELLED:
+                print(f"\n{outcome.error_message}\nRun ID: {turn_id}\n")
                 conversation.remove_last_message()
-                continue
-
-            conversation.add_assistant_message(assistant_message)
-            store.save(conversation.stored_messages)
+            else:
+                print(f"\nApplication error: {outcome.error_message}\nRun ID: {turn_id}\n")
+                conversation.remove_last_message()
 
             print("\n")
     finally:
-        # Runs on /bye, EOF, Ctrl+C, normal completion, and any escaping
-        # exception — the MCP session and child process are always closed.
+        # Runs on /bye, EOF, Ctrl+C, normal completion, MCP startup failure, and
+        # any escaping exception — the MCP session and child process are always
+        # closed, and the run is always closed out in the trace.
         manager.close()
+        trace_sink.emit(
+            build_event(
+                "run_finished",
+                run_id=run_id,
+                duration_ms=int((time.monotonic() - run_started_at) * 1000),
+            )
+        )
 
 
 if __name__ == "__main__":

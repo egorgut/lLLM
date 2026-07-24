@@ -16,6 +16,22 @@ CHAT_HISTORY_PATH = "data/chat_history.json"
 # can never read or change it, and a request beyond this count is not executed.
 MAX_TOOL_CALLS_PER_TURN = 4
 
+# Agent reliability (SPEC-011). Host-owned time limits and repeated-call policy.
+# None of these are ever supplied or changed by the model. Timeouts are
+# caller-side deadlines (see reliability.run_with_deadline): a component that
+# does not return in time is abandoned, not forcibly terminated.
+MODEL_REQUEST_TIMEOUT_SECONDS = 120
+TOOL_EXECUTION_TIMEOUT_SECONDS = 30
+AGENT_TURN_TIMEOUT_SECONDS = 180
+MAX_IDENTICAL_TOOL_CALLS = 2
+
+# Local structured tracing (SPEC-011). Append-only JSONL, local-only, never
+# uploaded. Generated traces are git-ignored; only this configuration and the
+# tracing code are committed.
+TRACE_ENABLED = True
+TRACE_PATH = "data/traces/agent.jsonl"
+TRACE_PAYLOAD_PREVIEW_CHARS = 1000
+
 # Local Chinook SQLite database (SPEC-008). Resolved relative to this file so the
 # paths hold regardless of the current working directory. The seed script is the
 # trusted source under version control; the runtime database is generated from it
