@@ -40,6 +40,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CHINOOK_SEED_PATH = PROJECT_ROOT / "data" / "seed" / "Chinook_Sqlite.sql"
 SQLITE_DATABASE_PATH = PROJECT_ROOT / "data" / "chinook.sqlite"
 
+# Filesystem-backed skill layer (SPEC-012). Skills are declarative packages that
+# live under SKILLS_ROOT and are discovered, validated, and frozen at startup —
+# never supplied or mutated by the model. The routing model sees only a compact
+# catalog (name + description); the full instruction of the one selected skill is
+# loaded lazily for that turn. All bounds below are host-owned and validated at
+# startup (skill_runtime.config_validation.validate_skill_config).
+SKILLS_ROOT = PROJECT_ROOT / "skills"
+# Skill routing has its own component timeout but still counts against the whole
+# AGENT_TURN_TIMEOUT_SECONDS budget shared with agent execution.
+SKILL_ROUTING_TIMEOUT_SECONDS = 30
+# Additional routing requests permitted after the first; 1 => at most two total.
+SKILL_ROUTING_REPAIR_ATTEMPTS = 1
+MAX_SKILL_ROUTING_RESPONSE_CHARS = 2_000
+MAX_SKILL_INSTRUCTION_CHARS = 20_000
+MAX_SKILL_SCHEMA_BYTES = 100_000
+MAX_SKILLS = 100
+MAX_SKILL_DESCRIPTION_CHARS = 200
+
 # Local MCP servers launched by the host over stdio (SPEC-009). Each entry is a
 # child process the harness starts; the command, arguments, and environment are
 # controlled here by the developer and can never be supplied by the model or by

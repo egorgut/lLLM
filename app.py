@@ -1,24 +1,40 @@
 import json
 import time
 
-from agent import AgentRunner
 from config import (
     AGENT_TURN_TIMEOUT_SECONDS,
     CHAT_HISTORY_PATH,
     MAX_IDENTICAL_TOOL_CALLS,
+    MAX_SKILL_DESCRIPTION_CHARS,
+    MAX_SKILL_INSTRUCTION_CHARS,
+    MAX_SKILL_ROUTING_RESPONSE_CHARS,
+    MAX_SKILL_SCHEMA_BYTES,
+    MAX_SKILLS,
     MAX_TOOL_CALLS_PER_TURN,
     MCP_SERVERS,
     MODEL_NAME,
     MODEL_REQUEST_TIMEOUT_SECONDS,
+    SKILL_ROUTING_REPAIR_ATTEMPTS,
+    SKILL_ROUTING_TIMEOUT_SECONDS,
+    SKILLS_ROOT,
     SQLITE_DATABASE_PATH,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
     TRACE_ENABLED,
     TRACE_PATH,
+    TRACE_PAYLOAD_PREVIEW_CHARS,
 )
 from conversation import Conversation
 from llm import ModelResponse, ModelToolCall
 from mcp_integration import McpClientManager, McpStartupError
 from reliability import TurnStatus, new_id
+from skill_runtime import (
+    SkillPackageError,
+    SkillPackageLoader,
+    SkillRouter,
+    SkillTurnOrchestrator,
+    validate_skill_config,
+)
+from skill_runtime.models import SkillSelection
 from storage import JsonConversationStore
 from tools import (
     PYTHON_CALCULATE_SPEC,
@@ -130,8 +146,64 @@ def main() -> None:
             raise SystemExit(1)
 
         tools = registry.to_ollama_tools()
+
+        # Skills are validated against the FINAL tool registry (local + MCP), so
+        # this must run after MCP registration. A malformed package or a reference
+        # to an unavailable tool is a fail-fast startup error, not a turn-time
+        # event (SPEC-012 §15). The surrounding `finally` still closes MCP.
+        validate_skill_config(
+            skill_routing_timeout_seconds=SKILL_ROUTING_TIMEOUT_SECONDS,
+            skill_routing_repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
+            max_skill_routing_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
+            max_skill_instruction_chars=MAX_SKILL_INSTRUCTION_CHARS,
+            max_skill_schema_bytes=MAX_SKILL_SCHEMA_BYTES,
+            max_skills=MAX_SKILLS,
+            max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
+        )
+        try:
+            skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, registry)
+        except SkillPackageError as error:
+            print(f"Application startup failed: {error}")
+            raise SystemExit(1)
+
+        router = SkillRouter(
+            route=lambda messages: "".join(ModelResponse(messages, None).text_chunks()),
+            timeout_seconds=SKILL_ROUTING_TIMEOUT_SECONDS,
+            max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
+            repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
+            payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
+        )
+
+        def announce_skill(selection: SkillSelection) -> None:
+            # Print the [skill] line only when a skill is selected, before the
+            # agent loop's tool/answer output (SPEC-012 §"User-visible behavior").
+            if selection.skill_name:
+                print(f"[skill] {selection.skill_name}")
+
+        orchestrator = SkillTurnOrchestrator(
+            skill_registry=skill_registry,
+            router=router,
+            tool_registry=registry,
+            executor=executor,
+            respond=lambda messages, declarations: ModelResponse(messages, declarations),
+            renderer_factory=CliRenderer,
+            default_tools=tools,
+            run_id=run_id,
+            max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+            max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
+            model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+            tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
+            agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+            trace_sink=trace_sink,
+            payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
+            on_selection=announce_skill,
+        )
+
         for summary in manager.server_summaries():
             print(f"[mcp] connected: {summary}")
+        if len(skill_registry):
+            names = ", ".join(entry.name for entry in skill_registry.catalog())
+            print(f"[skills] {len(skill_registry)} loaded: {names}")
 
         print("Local AI chat")
         print("Enter /reset to clear the conversation, /bye to exit.\n")
@@ -158,49 +230,40 @@ def main() -> None:
                 print("Conversation cleared.\n")
                 continue
 
+            # Tentatively append the user message. The orchestrator routes to
+            # zero or one skill and drives the bounded model->tool->model loop
+            # over a snapshot of the model-facing messages; routing and execution
+            # share one turn_id and one whole-turn deadline. Routing protocol
+            # messages are never added to the conversation.
             conversation.add_user_message(user_message)
-            turn_id = new_id()
-
-            # A fresh renderer per turn resets the lazy 'Qwen:' prefix state. The
-            # runner drives the bounded model->tool->model loop over a snapshot of
-            # the model-facing messages; it never sees the mutable Conversation.
-            runner = AgentRunner(
-                respond=lambda messages, declarations: ModelResponse(
-                    messages, declarations
-                ),
-                executor=executor,
-                tools=tools,
-                renderer=CliRenderer(),
-                run_id=run_id,
-                max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
-                max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-                model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
-                tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-                agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
-                trace_sink=trace_sink,
-            )
 
             try:
-                outcome = runner.run_turn(conversation.messages_for_model, turn_id=turn_id)
+                result = orchestrator.run_turn(conversation)
             except Exception:
                 # A safety net beyond AgentRunner's own internal_error
                 # conversion: the terminal trace event is already guaranteed by
                 # run_turn itself before this exception reaches us.
                 print(
                     "\nApplication error: Unexpected application error.\n"
-                    f"Run ID: {turn_id}\n"
+                    f"Run ID: {run_id}\n"
                 )
                 conversation.remove_last_message()
                 continue
 
+            outcome = result.outcome
+            # Only a completed turn persists; every other outcome (including any
+            # routing failure) rolls back the tentative user message.
             if outcome.status is TurnStatus.COMPLETED:
                 conversation.add_assistant_message(outcome.final_text)
                 store.save(conversation.stored_messages)
             elif outcome.status is TurnStatus.CANCELLED:
-                print(f"\n{outcome.error_message}\nRun ID: {turn_id}\n")
+                print(f"\n{outcome.error_message}\nRun ID: {outcome.turn_id}\n")
                 conversation.remove_last_message()
             else:
-                print(f"\nApplication error: {outcome.error_message}\nRun ID: {turn_id}\n")
+                print(
+                    f"\nApplication error: {outcome.error_message}\n"
+                    f"Run ID: {outcome.turn_id}\n"
+                )
                 conversation.remove_last_message()
 
             print("\n")

@@ -36,8 +36,10 @@ from reliability import (
     DeadlineExceeded,
     ModelRequestTimeout,
     RepeatedToolCallError,
+    SkillPolicyViolation,
     TerminationReason,
     ToolExecutionTimeout,
+    TurnContext,
     TurnTimeoutExceeded,
     new_id,
     run_with_deadline,
@@ -159,9 +161,20 @@ class AgentRunner:
         self._clock = clock
         self._id_factory = id_factory
         self._payload_preview_chars = payload_preview_chars
+        # Per-turn skill context (SPEC-012); (re)assigned at the top of run_turn.
+        self._selected_skill: str | None = None
+        self._skill_version: str | None = None
+        self._routing_model_requests = 0
 
     def run_turn(
-        self, messages: list[dict[str, Any]], *, turn_id: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        turn_id: str | None = None,
+        turn_context: TurnContext | None = None,
+        selected_skill: str | None = None,
+        skill_version: str | None = None,
+        routing_model_requests: int = 0,
     ) -> AgentTurnOutcome:
         """Drive the loop until a terminal outcome and return it.
 
@@ -171,11 +184,27 @@ class AgentRunner:
         a `failed/internal_error` outcome (with the terminal event emitted)
         before being re-raised, so it remains visible to callers/tests while
         the trace stays complete.
+
+        When a `turn_context` is supplied (SPEC-012), the turn adopts its
+        `turn_id`, absolute `started_at`, and shared whole-turn `deadline` rather
+        than minting fresh ones — so skill routing and agent execution share one
+        budget and `duration_ms` covers both. `routing_model_requests` is added
+        to the agent's own model requests so `model_requests` means "all model
+        requests made for the user turn"; `selected_skill`/`skill_version` enrich
+        the trace only.
         """
 
-        turn_id = turn_id or self._id_factory()
-        start = self._clock()
-        deadline = start + self._agent_turn_timeout_seconds
+        if turn_context is not None:
+            turn_id = turn_context.turn_id
+            start = turn_context.started_at
+            deadline = turn_context.deadline
+        else:
+            turn_id = turn_id or self._id_factory()
+            start = self._clock()
+            deadline = start + self._agent_turn_timeout_seconds
+        self._selected_skill = selected_skill
+        self._skill_version = skill_version
+        self._routing_model_requests = routing_model_requests
         counters = _Counters()
 
         self._trace.emit(
@@ -185,6 +214,7 @@ class AgentRunner:
                 turn_id=turn_id,
                 message_count=len(messages),
                 available_tools=[tool["function"]["name"] for tool in self._tools],
+                selected_skill=selected_skill,
                 limits={
                     "max_tool_calls": self._max_tool_calls,
                     "max_identical_tool_calls": self._max_identical_tool_calls,
@@ -248,7 +278,8 @@ class AgentRunner:
             reason=reason,
             final_text=final_text,
             tool_calls_executed=counters.tool_calls_executed,
-            model_requests=counters.model_requests,
+            # "all model requests made for the user turn" = routing + agent.
+            model_requests=counters.model_requests + self._routing_model_requests,
             duration_ms=int((self._clock() - start) * 1000),
             error_message=error_message,
         )
@@ -263,6 +294,10 @@ class AgentRunner:
                 reason=str(outcome.reason),
                 tool_calls_executed=outcome.tool_calls_executed,
                 model_requests=outcome.model_requests,
+                routing_model_requests=self._routing_model_requests,
+                agent_model_requests=outcome.model_requests - self._routing_model_requests,
+                selected_skill=self._selected_skill,
+                skill_version=self._skill_version,
                 final_text_chars=len(outcome.final_text) if outcome.final_text else 0,
                 duration_ms=outcome.duration_ms,
             )
@@ -452,6 +487,35 @@ class AgentRunner:
                     timeout_seconds=effective_tool_timeout,
                     thread_name=f"tool-{tool_call_index}",
                 )
+            except SkillPolicyViolation as violation:
+                # A disallowed tool never reached its handler (the restricted
+                # executor raised before dispatch). This is a deliberate policy
+                # stop, not a tool failure, so it must not be folded into
+                # tool_execution_error (SPEC-012 §9).
+                self._trace.emit(
+                    build_event(
+                        "policy_violation",
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        policy="skill_tool_allowlist",
+                        skill=violation.skill,
+                        requested_tool=violation.requested_tool,
+                        message=str(violation),
+                    )
+                )
+                self._trace.emit(
+                    build_event(
+                        "tool_execution_finished",
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        tool_call_index=tool_call_index,
+                        tool_name=call.name,
+                        result_ok=False,
+                        error_type="policy_violation",
+                        duration_ms=int((self._clock() - tool_start) * 1000),
+                    )
+                )
+                raise
             except DeadlineExceeded:
                 self._trace.emit(
                     build_event(

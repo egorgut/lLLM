@@ -67,6 +67,35 @@ class TestEvaluateExpectation:
         )
         assert failures == []
 
+    def test_forbidden_tool_use_is_a_failure(self):
+        failures = evaluate_expectation(
+            make_outcome(),
+            ["mcp_time__get_current_time"],
+            {"forbidden_tools": ["mcp_time__get_current_time"]},
+        )
+        assert len(failures) == 1
+
+    def test_expected_selection_mismatch_is_a_failure(self):
+        from skill_runtime.models import SkillSelection
+
+        selection = SkillSelection("database_exploration", "r", "model", 1, 5)
+        failures = evaluate_expectation(
+            make_outcome(),
+            [],
+            {"expected_selection": "sales_analysis"},
+            selection=selection,
+        )
+        assert len(failures) == 1
+
+    def test_expected_selection_none_matches_no_skill(self):
+        from skill_runtime.models import SkillSelection
+
+        selection = SkillSelection(None, "no skill", "model", 1, 5)
+        failures = evaluate_expectation(
+            make_outcome(), [], {"expected_selection": None}, selection=selection
+        )
+        assert failures == []
+
 
 class TestCasesFile:
     def test_committed_cases_load_and_have_unique_stable_ids(self):
@@ -88,6 +117,12 @@ class TestCasesFile:
             "repetition_guard",
             "tool_call_budget_guard",
             "timeout",
+            "skill_explicit",
+            "skill_auto",
+            "skill_none",
+            "skill_clarification",
+            "skill_policy_violation",
+            "skill_routing_repair",
         }
 
 

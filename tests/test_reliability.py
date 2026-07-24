@@ -4,7 +4,13 @@ import time
 import pytest
 
 from reliability import (
+    STATUS_BY_REASON,
+    USER_MESSAGE_BY_REASON,
     DeadlineExceeded,
+    SkillPolicyViolation,
+    TerminationReason,
+    TurnContext,
+    TurnStatus,
     canonical_json,
     run_with_deadline,
     tool_call_fingerprint,
@@ -123,3 +129,45 @@ class TestValidateReliabilityConfig:
                 agent_turn_timeout_seconds=30,
             )
         )
+
+
+class TestSkillTerminationReasons:
+    def test_every_reason_has_a_status(self):
+        for reason in TerminationReason:
+            assert reason in STATUS_BY_REASON
+
+    def test_skill_reason_status_mapping(self):
+        assert STATUS_BY_REASON[TerminationReason.SKILL_ROUTING_TIMEOUT] is TurnStatus.TIMED_OUT
+        assert STATUS_BY_REASON[TerminationReason.SKILL_ROUTING_ERROR] is TurnStatus.FAILED
+        assert STATUS_BY_REASON[TerminationReason.INVALID_SKILL_SELECTION] is TurnStatus.FAILED
+        assert STATUS_BY_REASON[TerminationReason.SKILL_LOAD_ERROR] is TurnStatus.FAILED
+        assert STATUS_BY_REASON[TerminationReason.SKILL_POLICY_VIOLATION] is TurnStatus.STOPPED
+
+    def test_skill_reasons_have_user_messages(self):
+        for reason in (
+            TerminationReason.SKILL_ROUTING_TIMEOUT,
+            TerminationReason.SKILL_ROUTING_ERROR,
+            TerminationReason.INVALID_SKILL_SELECTION,
+            TerminationReason.SKILL_LOAD_ERROR,
+            TerminationReason.SKILL_POLICY_VIOLATION,
+        ):
+            assert USER_MESSAGE_BY_REASON[reason]
+
+    def test_policy_violation_carries_context(self):
+        error = SkillPolicyViolation(
+            "not allowed", requested_tool="mcp_time__get_current_time", skill="sales_analysis"
+        )
+        assert error.reason is TerminationReason.SKILL_POLICY_VIOLATION
+        assert error.requested_tool == "mcp_time__get_current_time"
+        assert error.skill == "sales_analysis"
+
+
+class TestTurnContext:
+    def test_is_frozen_and_carries_shared_budget(self):
+        context = TurnContext(
+            run_id="run-1", turn_id="turn-1", started_at=100.0, deadline=280.0
+        )
+        assert context.turn_id == "turn-1"
+        assert context.deadline - context.started_at == 180.0
+        with pytest.raises(Exception):
+            context.turn_id = "other"  # frozen

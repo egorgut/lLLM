@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SalesAnalysisInput",
+  "type": "object",
+  "properties": {
+    "metric": {
+      "type": "string",
+      "description": "Requested sales metric, for example revenue or quantity."
+    },
+    "period": {
+      "type": ["string", "null"],
+      "description": "Requested reporting period when applicable."
+    },
+    "dimensions": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": ["metric"],
+  "additionalProperties": false
+}

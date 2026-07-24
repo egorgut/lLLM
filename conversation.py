@@ -42,9 +42,31 @@ class Conversation:
         return list(self._messages)
 
     @property
-    def messages_for_model(self) -> list[dict[str, str]]:
-        """What the model sees: system prompt + last MAX_CONTEXT_MESSAGES."""
+    def latest_user_message(self) -> str:
+        """The most recent user message's content, or '' if there is none.
 
-        system_message = {"role": "system", "content": self.system_prompt}
+        Used by the skill router to route the current request; the stored history
+        is never mutated by reading it (SPEC-012 §14).
+        """
+
+        for message in reversed(self._messages):
+            if message.get("role") == "user":
+                return message.get("content", "")
+        return ""
+
+    def messages_for_model(
+        self, *, additional_system: str | None = None
+    ) -> list[dict[str, str]]:
+        """What the model sees: system prompt + last MAX_CONTEXT_MESSAGES.
+
+        When ``additional_system`` is given (SPEC-012, a host-generated active-skill
+        wrapper), it is appended to the system message content — joining the
+        trusted system-level context, never added as a user message. The stored
+        history is unchanged; the skill segment is ephemeral to this one turn.
+        """
+
+        content = self.system_prompt
+        if additional_system:
+            content = f"{content}\n\n{additional_system}"
         recent = self._messages[-MAX_CONTEXT_MESSAGES:]
-        return [system_message, *recent]
+        return [{"role": "system", "content": content}, *recent]
