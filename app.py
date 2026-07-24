@@ -1,5 +1,7 @@
 import json
+import os
 import time
+from pathlib import Path
 
 from config import (
     AGENT_TURN_TIMEOUT_SECONDS,
@@ -14,6 +16,7 @@ from config import (
     MCP_SERVERS,
     MODEL_NAME,
     MODEL_REQUEST_TIMEOUT_SECONDS,
+    PROJECT_ROOT,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
     SKILL_ROUTING_TIMEOUT_SECONDS,
     SKILLS_ROOT,
@@ -51,6 +54,40 @@ from tools import (
     python_calculate,
 )
 from tracing import JsonlTraceSink, NullTraceSink, SafeTraceSink, build_event
+
+_DOTENV_PATH = PROJECT_ROOT / ".env"
+
+
+def load_dotenv_if_present(path: Path = _DOTENV_PATH) -> None:
+    """Fill in missing process environment variables from a local `.env` file.
+
+    A tiny, dependency-free stand-in for `python-dotenv`, in keeping with this
+    project's framework-free ethos (SPEC-013 explicitly allows this "unless
+    implementation explicitly chooses and documents it" -- this is that
+    choice). A variable already present in the real process environment
+    always wins: this only fills gaps, exactly as if you had exported it
+    yourself. A missing `.env` is not an error -- the file is optional, and a
+    fresh checkout never needs one (SPEC-013 Tracker integration stays
+    disabled by default either way).
+
+    Supports only `KEY=value` lines, optional single/double-quoted values,
+    blank lines, and full-line `#` comments -- no interpolation, no export
+    keyword, no multi-line values.
+    """
+
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def build_executor() -> tuple[ToolRegistry, ToolExecutor]:
@@ -149,6 +186,11 @@ class CliRenderer:
 
 
 def main() -> None:
+    # Fill any gaps in the process environment from a local `.env` before
+    # anything (e.g. Tracker's config loader) reads it. Real exported
+    # variables always take precedence; a missing file is a no-op.
+    load_dotenv_if_present()
+
     # One run_id identifies this whole process; a fresh turn_id correlates
     # every trace event and CLI diagnostic for one user turn (SPEC-011 §3).
     run_id = new_id()
