@@ -407,9 +407,13 @@ def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
     # Ollama connection, real local tools, and a real MCP server. Keeping this
     # import out of the module top level means the scripted suite (and the
     # rest of the test/import graph) never depends on any of that.
-    from app import build_executor, build_mcp_servers, register_mcp_tools
+    from app import build_executor, build_mcp_servers, load_dotenv_if_present, register_mcp_tools
     from llm import ModelResponse
     from mcp_integration import McpClientManager, McpStartupError
+
+    # Same gap-filling as app.py's main(): a local .env supplies Tracker
+    # credentials for this manual live run without needing them re-exported.
+    load_dotenv_if_present()
 
     registry, executor = build_executor()
     recording_executor = _RecordingExecutorWrapper(executor)
