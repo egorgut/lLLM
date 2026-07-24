@@ -27,6 +27,12 @@ models/
 data/chinook.sqlite
 data/.chinook.sqlite.*.tmp
 
+# Structured agent traces and evaluation results (SPEC-011): generated,
+# local-only, and never uploaded. `evals/` (the committed case definitions
+# and runner) is a different, tracked top-level directory and is unaffected.
+data/traces/
+data/evals/
+
 # OS / editor
 .DS_Store
 .idea/

@@ -35,9 +35,11 @@ from mcp_integration.adapter import (
 )
 from tools import ToolSpec
 
-# Bounds so a wedged child can never hang the CLI indefinitely.
+# Bounds so a wedged child can never hang the CLI indefinitely. The call
+# timeout is host-configurable (SPEC-011 §10); the other two are internal
+# lifecycle bounds not exposed to the rest of the application.
 _STARTUP_TIMEOUT = 30.0
-_CALL_TIMEOUT = 30.0
+_DEFAULT_CALL_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 10.0
 
 
@@ -55,8 +57,13 @@ class McpStartupError(Exception):
 
 
 class McpClientManager:
-    def __init__(self, servers_config: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        servers_config: dict[str, dict[str, Any]],
+        call_timeout: float = _DEFAULT_CALL_TIMEOUT,
+    ) -> None:
         self._servers_config = servers_config
+        self._call_timeout = call_timeout
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
@@ -279,7 +286,7 @@ class McpClientManager:
         try:
             return asyncio.run_coroutine_threadsafe(
                 self._invoke(server_id, remote_name, arguments), loop
-            ).result(timeout=_CALL_TIMEOUT)
+            ).result(timeout=self._call_timeout)
         except Exception:
             return _error_envelope(
                 server_id, remote_name, "mcp_call_failed", "The MCP tool call failed."
