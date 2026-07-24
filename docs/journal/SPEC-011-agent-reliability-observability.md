@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-011](../../specs/SPEC-011-Agent-Reliability-Observability.md)
 - **Date:** 2026-07-24
 - **Branch:** feature/SPEC-011-agent-reliability-observability
-- **Merge commit:** _pending — recorded in a follow-up commit after merge_
+- **Merge commit:** 7786309
 
 ## Hypothesis / intent
 SPEC-010 gave the agent a bounded model→tool→model loop, but several failure
