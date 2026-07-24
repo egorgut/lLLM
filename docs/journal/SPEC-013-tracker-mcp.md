@@ -256,6 +256,24 @@ Not executed even after this addendum: `python -m evals.runner --suite live
 `TRACKER_SMOKE_*` placeholders) and any actual read operation against real
 Tracker content.
 
+**Addendum — `.env` loader (same day, second follow-up).** To avoid
+re-exporting Tracker credentials in every shell session, added
+`app.py::load_dotenv_if_present()`: a small, dependency-free `.env` loader
+(fills gaps in `os.environ`, never overrides a real exported variable, no-op
+if the file is absent) wired into both `app.py::main()` and
+`evals/runner.py`'s live path. No `python-dotenv` dependency was added —
+this fulfills the spec's own "unless implementation explicitly chooses and
+documents it" allowance, matching the project's existing hand-rolled-parser
+precedent (`skill_runtime/loader.py`'s front-matter parser instead of
+PyYAML). Covered by `tests/test_dotenv_loader.py` (6 cases: missing file,
+fill-gap, no-override, quote-stripping, comments/blank/malformed lines,
+blank-key rejection). Verified live end-to-end: with `.env` containing the
+real `TRACKER_TOKEN`/`TRACKER_CLOUD_ORG_ID` used in the first addendum and
+*no* variables exported in the shell, `python app.py` again reported
+`[mcp] connected: tracker (4 admitted, 35 filtered)`. `.env` itself is
+git-ignored (confirmed via `git check-ignore` and `git status` before every
+commit in this addendum) and was created with `chmod 600`.
+
 ## Outcome
 
 Meets the acceptance criteria achievable without live Tracker access: exactly
