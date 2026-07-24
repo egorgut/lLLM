@@ -224,13 +224,37 @@ Confirms, on the real model, that disabling Tracker removes `tracker_read` as
 an executable capability entirely (the model has no skill or tool to reach
 for) while every existing local/MCP behavior is unaffected.
 
-**Not executed this session:** `python -m evals.runner --suite live --category
-tracker` and the spec's "Manual verification scenario" against a real Yandex
-Tracker instance. This environment has neither `uv`/`uvx` installed nor real
-Tracker credentials. All deterministic and scripted verification passed;
-live Tracker verification is a **pending manual follow-up** for an operator
-with both available (see `README.md`'s Tracker section and `.env.example`
-for exact preconditions and commands).
+**Addendum — live startup verification (same day, post-merge).** The operator
+installed `uv` (via Homebrew) and supplied a real `TRACKER_TOKEN` and
+`TRACKER_CLOUD_ORG_ID` for their own Yandex Tracker organisation, passed
+transiently via shell environment only (never written to any file, `.env`,
+commit, or trace). `python app.py` was run once with Tracker enabled and
+immediately exited via `/bye`:
+
+```text
+$ TRACKER_MCP_ENABLED=true, real TRACKER_TOKEN + TRACKER_CLOUD_ORG_ID
+[mcp] connected: time (1 tool)
+[mcp] connected: tracker (4 admitted, 35 filtered)
+[skills] 2 loaded: sales_analysis, tracker_read
+```
+
+This is the core security property of SPEC-013 confirmed against the *real*
+upstream catalog, not a fake one: exactly four tools admitted, 35 other
+real Tracker operations (including every mutation tool) filtered before
+registration. `uvx` resolved and cached the pinned `yandex-tracker-mcp==0.7.2`
+release in its own isolated environment (61 packages), never touching the
+project's own venv/`requirements.txt`. No orphan process remained after exit
+(`ps aux` checked). The operator declined to proceed to an actual
+`issue_get`/`issues_find`/`queue_get_metadata`/`issue_get_comments` read
+against real data, to avoid pulling real company content into this chat
+session — that remains open, see Follow-ups. The token was flagged as
+exposed (pasted in plaintext into the chat) and the operator was advised to
+rotate it in Yandex Tracker regardless of this verification's outcome.
+
+Not executed even after this addendum: `python -m evals.runner --suite live
+--category tracker` (the four scripted-style live cases with
+`TRACKER_SMOKE_*` placeholders) and any actual read operation against real
+Tracker content.
 
 ## Outcome
 
@@ -250,12 +274,17 @@ and tracing behavior all remain green and unchanged.
 
 ## Follow-ups
 
-- Live Tracker verification (`--suite live --category tracker` and the
-  manual `python app.py` scenario) is owed once an operator has `uv`/`uvx`
-  installed and real Tracker credentials; the pinned version
-  (`yandex-tracker-mcp==0.7.2`) should be re-confirmed compatible at that
-  time, per the spec's own "verified during implementation, re-verified
-  before any future version bump" expectation.
+- Live *read-operation* verification (`issue_get`/`issues_find`/
+  `queue_get_metadata`/`issue_get_comments` against real data, and
+  `--suite live --category tracker`) is still owed — startup/admission was
+  confirmed live (see addendum above), but no actual read was performed.
+  The pinned version (`yandex-tracker-mcp==0.7.2`) should be re-confirmed
+  compatible whenever this is next attempted, per the spec's own "verified
+  during implementation, re-verified before any future version bump"
+  expectation.
+- The `TRACKER_TOKEN` used for the addendum above was pasted in plaintext
+  into a chat session; it should be treated as exposed and rotated in
+  Yandex Tracker independent of this journal.
 - `evals.runner`'s live path does not route through the skill layer for any
   skill (not just `tracker_read`) — a pre-existing gap, not introduced here.
   A future step could add skill-orchestrator support to the live suite if
