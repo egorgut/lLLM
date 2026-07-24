@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-012](../../specs/SPEC-012-Skills.md)
 - **Date:** 2026-07-24
 - **Branch:** feature/SPEC-012-skills
-- **Merge commit:** <short-sha>
+- **Merge commit:** a9aedf3
 
 ## Hypothesis / intent
 
