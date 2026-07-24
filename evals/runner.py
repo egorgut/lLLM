@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -35,7 +36,6 @@ from config import (
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_ROUTING_RESPONSE_CHARS,
     MAX_TOOL_CALLS_PER_TURN,
-    MCP_SERVERS,
     MODEL_NAME,
     MODEL_REQUEST_TIMEOUT_SECONDS,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
@@ -254,7 +254,13 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
     """
 
     tool_registry = make_tool_registry(
-        "sql_query", "python_calculate", "mcp_time__get_current_time"
+        "sql_query",
+        "python_calculate",
+        "mcp_time__get_current_time",
+        "mcp_tracker__issue_get",
+        "mcp_tracker__issues_find",
+        "mcp_tracker__queue_get_metadata",
+        "mcp_tracker__issue_get_comments",
     )
     skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, tool_registry)
     executor = FakeToolExecutor(
@@ -324,6 +330,30 @@ class _RecordingExecutorWrapper:
         return self._inner.execute(name, arguments)
 
 
+def _render_live_prompt(template: str) -> str:
+    """Substitute operator-supplied Tracker smoke fixtures into a live prompt.
+
+    A live case must never hardcode a real issue/queue/query -- those are
+    operator-specific (SPEC-013 §"Live smoke suite"). A placeholder left
+    unset renders as a visible "not set" marker rather than a plausible-looking
+    fake identifier, so a misconfigured run fails obviously instead of quietly
+    exercising the wrong Tracker object.
+    """
+
+    values = {
+        "tracker_issue_id": os.environ.get(
+            "TRACKER_SMOKE_ISSUE_ID", "<TRACKER_SMOKE_ISSUE_ID not set>"
+        ),
+        "tracker_queue_id": os.environ.get(
+            "TRACKER_SMOKE_QUEUE_ID", "<TRACKER_SMOKE_QUEUE_ID not set>"
+        ),
+        "tracker_search_query": os.environ.get(
+            "TRACKER_SMOKE_SEARCH_QUERY", "<TRACKER_SMOKE_SEARCH_QUERY not set>"
+        ),
+    }
+    return template.format(**values)
+
+
 def run_live_case(case: dict[str, Any], executor, tools, respond, run_id: str) -> CaseResult:
     from prompts import SYSTEM_PROMPT
 
@@ -342,7 +372,7 @@ def run_live_case(case: dict[str, Any], executor, tools, respond, run_id: str) -
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": case["prompt"]},
+        {"role": "user", "content": _render_live_prompt(case["prompt"])},
     ]
 
     executor.calls.clear()
@@ -377,18 +407,28 @@ def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
     # Ollama connection, real local tools, and a real MCP server. Keeping this
     # import out of the module top level means the scripted suite (and the
     # rest of the test/import graph) never depends on any of that.
-    from app import build_executor, register_mcp_tools
+    from app import build_executor, build_mcp_servers, register_mcp_tools
     from llm import ModelResponse
     from mcp_integration import McpClientManager, McpStartupError
 
     registry, executor = build_executor()
     recording_executor = _RecordingExecutorWrapper(executor)
-    manager = McpClientManager(MCP_SERVERS, call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS)
+    run_id = new_id()
+    # Reuses exactly the same effective server map (static local servers +
+    # conditional Tracker) that app.py's main() builds, so a live Tracker
+    # eval and a live `python app.py` session see identical MCP configuration.
+    mcp_servers = build_mcp_servers()
+    manager = McpClientManager(
+        mcp_servers,
+        call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
+        run_id=run_id,
+        trace_sink=NullTraceSink(),
+    )
 
     try:
         try:
             manager.start()
-            register_mcp_tools(registry, executor, manager)
+            register_mcp_tools(registry, executor, manager, mcp_servers)
         except McpStartupError as error:
             return [
                 CaseResult(
@@ -404,7 +444,6 @@ def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
             ]
 
         tools = registry.to_ollama_tools()
-        run_id = new_id()
 
         def respond(messages, declarations):
             return ModelResponse(messages, declarations)
@@ -417,9 +456,13 @@ def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
         manager.close()
 
 
-def run_suite(suite: str, cases_path: Path) -> tuple[dict[str, int], list[CaseResult]]:
+def run_suite(
+    suite: str, cases_path: Path, category: str | None = None
+) -> tuple[dict[str, int], list[CaseResult]]:
     cases = load_cases(cases_path)
     applicable = [case for case in cases if suite in case.get("modes", ["scripted", "live"])]
+    if category is not None:
+        applicable = [case for case in applicable if case.get("category", "").startswith(category)]
 
     if suite == "scripted":
         results = [
@@ -478,9 +521,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the lLLM agent evaluation suite.")
     parser.add_argument("--suite", choices=["scripted", "live"], default="scripted")
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES_PATH)
+    parser.add_argument(
+        "--category",
+        type=str,
+        default=None,
+        help="Only run cases whose category starts with this prefix (e.g. 'tracker').",
+    )
     args = parser.parse_args(argv)
 
-    summary, results = run_suite(args.suite, args.cases)
+    summary, results = run_suite(args.suite, args.cases, args.category)
     model_name = "scripted" if args.suite == "scripted" else MODEL_NAME
     result_path = write_results(args.suite, summary, results, model_name)
 

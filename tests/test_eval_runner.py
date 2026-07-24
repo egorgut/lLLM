@@ -123,6 +123,19 @@ class TestCasesFile:
             "skill_clarification",
             "skill_policy_violation",
             "skill_routing_repair",
+            "tracker_issue_lookup",
+            "tracker_issue_search",
+            "tracker_queue_metadata",
+            "tracker_comment_summary",
+            "tracker_multi_read",
+            "tracker_read_only_refusal",
+            "tracker_filtered_tool",
+            "tracker_auth_error",
+            "tracker_permission_error",
+            "tracker_not_found",
+            "tracker_large_result",
+            "tracker_prompt_injection_content",
+            "tracker_live_smoke",
         }
 
 

@@ -385,3 +385,71 @@ def test_deterministic_registration_order(tmp_path):
         "beta_skill",
         "gamma_skill",
     ]
+
+
+# 24. `omit` (SPEC-013): a package whose tools are known in advance to be
+# unavailable this run is skipped entirely, without failing the rest of the
+# skill-loading pass -- a narrow, explicit, host-owned skip, not a general
+# "ignore unknown tools" relaxation.
+def _write_package_with_unavailable_tool(tmp_path, name="unavailable_skill"):
+    return write_package(
+        tmp_path,
+        name=name,
+        front_matter={
+            "name": name,
+            "description": "Depends on a tool this run does not have.",
+            "version": "1",
+            "allowed_tools": ["unavailable_tool"],
+        },
+    )
+
+
+def test_omit_skips_named_package_without_failing_others(tmp_path):
+    write_package(tmp_path, name="sample_skill")
+    _write_package_with_unavailable_tool(tmp_path)
+    registry = loader().load_all(
+        tmp_path, tool_registry(), omit=frozenset({"unavailable_skill"})
+    )
+    assert [s.name for s in registry.list_skills()] == ["sample_skill"]
+
+
+def test_without_omit_the_same_package_fails_fast(tmp_path):
+    write_package(tmp_path, name="sample_skill")
+    _write_package_with_unavailable_tool(tmp_path)
+    with pytest.raises(SkillPackageError, match="unknown tool 'unavailable_tool'"):
+        loader().load_all(tmp_path, tool_registry())
+
+
+def test_omitted_symlinked_package_dir_still_rejected(tmp_path):
+    real = tmp_path / "_real"
+    write_package(real, name="unavailable_skill")
+    root = tmp_path / "skills"
+    root.mkdir()
+    os.symlink(real / "unavailable_skill", root / "unavailable_skill")
+    with pytest.raises(SkillPackageError, match="Symlinked entry"):
+        loader().load_all(root, tool_registry(), omit=frozenset({"unavailable_skill"}))
+
+
+def test_omitted_invalid_directory_name_still_rejected(tmp_path):
+    write_package(tmp_path, name="Bad-Name")
+    with pytest.raises(SkillPackageError, match="Invalid skill package directory name"):
+        loader().load_all(tmp_path, tool_registry(), omit=frozenset({"Bad-Name"}))
+
+
+def test_omitted_package_still_counts_toward_max_skills(tmp_path):
+    write_package(tmp_path, name="sample_skill")
+    _write_package_with_unavailable_tool(tmp_path)
+    with pytest.raises(SkillPackageError, match="Too many skill packages"):
+        loader(max_skills=1).load_all(
+            tmp_path, tool_registry(), omit=frozenset({"unavailable_skill"})
+        )
+
+
+def test_omit_of_unknown_name_is_harmless(tmp_path):
+    # Naming a package that doesn't exist under omit is not an error -- it
+    # simply never matches anything during the skip check.
+    write_package(tmp_path, name="sample_skill")
+    registry = loader().load_all(
+        tmp_path, tool_registry(), omit=frozenset({"does_not_exist"})
+    )
+    assert [s.name for s in registry.list_skills()] == ["sample_skill"]

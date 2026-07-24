@@ -15,9 +15,11 @@ The normalizer is deliberately generic — it is not specialized to the time too
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
+from config import MCP_RESULT_MAX_CHARS
 from tools import ToolSpec
 
 # Model-facing MCP names follow ``mcp_<server_id>__<remote_tool_name>``. The
@@ -124,7 +126,22 @@ def normalize_result(server_id: str, remote_name: str, result: Any) -> dict[str,
         data: dict[str, Any] = structured
     else:
         data = {"text": _join_text(content)}
-    return {"ok": True, **base, "data": data}
+    return {"ok": True, **base, "data": _bounded_data(data)}
+
+
+def _bounded_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Cap a successful result's size, generically, for every MCP server.
+
+    A third-party server response must never be assumed small merely because
+    the request asked for fewer records (SPEC-013 §"Large search result"). This
+    is the harness's own backstop, independent of whatever page size or field
+    list the model requested.
+    """
+
+    serialized = json.dumps(data, ensure_ascii=False)
+    if len(serialized) <= MCP_RESULT_MAX_CHARS:
+        return data
+    return {"truncated": True, "preview": serialized[:MCP_RESULT_MAX_CHARS]}
 
 
 def _extract_error(structured: Any, content: Any) -> dict[str, str]:

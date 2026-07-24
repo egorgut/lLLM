@@ -22,10 +22,16 @@ from config import (
     TRACE_ENABLED,
     TRACE_PATH,
     TRACE_PAYLOAD_PREVIEW_CHARS,
+    TRACKER_MCP_SERVER_ID,
 )
 from conversation import Conversation
 from llm import ModelResponse, ModelToolCall
-from mcp_integration import McpClientManager, McpStartupError
+from mcp_integration import (
+    McpClientManager,
+    McpServerConfig,
+    McpStartupError,
+    load_tracker_server_config,
+)
 from reliability import TurnStatus, new_id
 from skill_runtime import (
     SkillPackageError,
@@ -57,14 +63,41 @@ def build_executor() -> tuple[ToolRegistry, ToolExecutor]:
     return registry, executor
 
 
+def build_mcp_servers() -> dict[str, McpServerConfig]:
+    """The effective MCP server map: static local servers + conditional Tracker.
+
+    Reused identically by the live evaluation suite (``evals/runner.py``) so
+    both entry points construct exactly the same ``McpClientManager`` input.
+    """
+
+    servers: dict[str, McpServerConfig] = {}
+    for server_id, cfg in MCP_SERVERS.items():
+        servers[server_id] = McpServerConfig(
+            server_id=server_id,
+            command=cfg["command"],
+            args=tuple(cfg.get("args", [])),
+            env=dict(cfg.get("env") or {}),
+            enabled=cfg.get("enabled", True),
+            allowed_tools=cfg.get("allowed_tools"),
+            required_tools=frozenset(cfg.get("required_tools", ())),
+        )
+    servers[TRACKER_MCP_SERVER_ID] = load_tracker_server_config()
+    return servers
+
+
 def register_mcp_tools(
-    registry: ToolRegistry, executor: ToolExecutor, manager: McpClientManager
+    registry: ToolRegistry,
+    executor: ToolExecutor,
+    manager: McpClientManager,
+    mcp_servers: dict[str, McpServerConfig],
 ) -> None:
     """Register every discovered MCP tool beside the local tools.
 
     Each converted ToolSpec joins the shared registry, and a small synchronous
     adapter handler routes the model-selected call back through the MCP manager.
     A registration conflict is a startup error and aborts before the chat loop.
+    Only tools already admitted by ``manager`` (i.e. that survived host-owned
+    allowlist filtering) ever reach this point.
     """
 
     for spec in manager.tool_specs():
@@ -73,7 +106,7 @@ def register_mcp_tools(
         except (ValueError, TypeError) as error:
             raise McpStartupError(
                 "mcp_tool_name_collision",
-                _server_for(spec.name),
+                _server_for(spec.name, mcp_servers),
                 f"Could not register MCP tool '{spec.name}': {error}",
             ) from error
         executor.register_handler(
@@ -82,8 +115,8 @@ def register_mcp_tools(
         )
 
 
-def _server_for(model_facing_name: str) -> str:
-    for server_id in MCP_SERVERS:
+def _server_for(model_facing_name: str, mcp_servers: dict[str, McpServerConfig]) -> str:
+    for server_id in mcp_servers:
         if model_facing_name.startswith(f"mcp_{server_id}__"):
             return server_id
     return "?"
@@ -135,12 +168,22 @@ def main() -> None:
     # traceback) and exit without leaving a child process behind. The manager's
     # own per-call timeout is host-owned, matching the tool-execution deadline
     # AgentRunner enforces around every call (mcp_integration/client.py).
-    manager = McpClientManager(MCP_SERVERS, call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS)
+    # `manager` starts as None: building the effective server map itself can
+    # fail-fast (e.g. Tracker enabled but misconfigured), before any child
+    # process exists, so the closing `finally` below must tolerate that.
+    manager: McpClientManager | None = None
 
     try:
         try:
+            mcp_servers = build_mcp_servers()
+            manager = McpClientManager(
+                mcp_servers,
+                call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                run_id=run_id,
+                trace_sink=trace_sink,
+            )
             manager.start()
-            register_mcp_tools(registry, executor, manager)
+            register_mcp_tools(registry, executor, manager, mcp_servers)
         except McpStartupError as error:
             print(f"MCP startup failed for server '{error.server_id}': {error}")
             raise SystemExit(1)
@@ -160,8 +203,16 @@ def main() -> None:
             max_skills=MAX_SKILLS,
             max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
         )
+        # tracker_read depends entirely on the (possibly disabled) Tracker
+        # integration; when it is disabled, its tools were never registered,
+        # so the package is omitted deterministically as one configured
+        # feature unit instead of failing the whole skill-loading pass
+        # (SPEC-013 §"Tracker integration is disabled").
+        omit_skills = (
+            frozenset() if mcp_servers[TRACKER_MCP_SERVER_ID].enabled else frozenset({"tracker_read"})
+        )
         try:
-            skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, registry)
+            skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, registry, omit=omit_skills)
         except SkillPackageError as error:
             print(f"Application startup failed: {error}")
             raise SystemExit(1)
@@ -200,7 +251,7 @@ def main() -> None:
         )
 
         for summary in manager.server_summaries():
-            print(f"[mcp] connected: {summary}")
+            print(f"[mcp] {summary}")
         if len(skill_registry):
             names = ", ".join(entry.name for entry in skill_registry.catalog())
             print(f"[skills] {len(skill_registry)} loaded: {names}")
@@ -270,8 +321,11 @@ def main() -> None:
     finally:
         # Runs on /bye, EOF, Ctrl+C, normal completion, MCP startup failure, and
         # any escaping exception — the MCP session and child process are always
-        # closed, and the run is always closed out in the trace.
-        manager.close()
+        # closed, and the run is always closed out in the trace. `manager` may
+        # still be None if building the effective server map itself failed
+        # (e.g. Tracker enabled but misconfigured) before any child existed.
+        if manager is not None:
+            manager.close()
         trace_sink.emit(
             build_event(
                 "run_finished",

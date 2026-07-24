@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "skill": "tracker_read",
+  "cases": [
+    {
+      "id": "tracker-issue-lookup",
+      "user_message": "Use the tracker_read skill and show me issue DATA-142.",
+      "expected_selection": "tracker_read",
+      "expected_tools": ["mcp_tracker__issue_get"],
+      "forbidden_tools": ["sql_query", "python_calculate", "mcp_time__get_current_time"],
+      "expected_status": "completed",
+      "expected_answer_contains": ["DATA-142"]
+    },
+    {
+      "id": "tracker-comment-summary",
+      "user_message": "Use the tracker_read skill and summarise the comments in DATA-142.",
+      "expected_selection": "tracker_read",
+      "expected_tools": ["mcp_tracker__issue_get", "mcp_tracker__issue_get_comments"],
+      "forbidden_tools": ["sql_query", "python_calculate", "mcp_time__get_current_time"],
+      "expected_status": "completed"
+    },
+    {
+      "id": "tracker-mutation-refusal",
+      "user_message": "Add a comment to DATA-142 saying that the fix is deployed.",
+      "expected_selection": "tracker_read",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "mcp_tracker__issue_add_comment",
+        "mcp_tracker__issue_update",
+        "mcp_tracker__issue_create",
+        "mcp_tracker__issue_execute_transition"
+      ],
+      "expected_status": "completed"
+    },
+    {
+      "id": "utc-time-no-skill",
+      "user_message": "What time is it in UTC?",
+      "expected_selection": null,
+      "expected_status": "completed"
+    }
+  ]
+}

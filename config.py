@@ -32,6 +32,37 @@ TRACE_ENABLED = True
 TRACE_PATH = "data/traces/agent.jsonl"
 TRACE_PAYLOAD_PREVIEW_CHARS = 1000
 
+# External Yandex Tracker MCP server (SPEC-013). Disabled by default; a fresh
+# checkout never needs Tracker credentials. Enabling requires TRACKER_TOKEN and
+# exactly one organisation-id variable (TRACKER_CLOUD_ORG_ID or
+# TRACKER_ORG_ID); see mcp_integration/config.py, which is the only module
+# that reads that environment. The package reference is pinned to an exact
+# tested release; committed configuration must never use "@latest".
+TRACKER_MCP_SERVER_ID = "tracker"
+TRACKER_MCP_COMMAND = "uvx"
+TRACKER_MCP_PACKAGE = "yandex-tracker-mcp==0.7.2"
+TRACKER_MCP_ARGS = ["--from", TRACKER_MCP_PACKAGE, "yandex-tracker-mcp"]
+TRACKER_MCP_REQUIRED_TOOLS = frozenset(
+    {
+        "issue_get",
+        "issues_find",
+        "queue_get_metadata",
+        "issue_get_comments",
+    }
+)
+# Advisory guidance surfaced to the model via the tracker_read skill
+# instructions, not mechanically enforced on tool arguments (enforcing a
+# per-argument cap would be Yandex-specific dispatch logic, which this project
+# deliberately avoids). The actual host-owned backstop against an oversized
+# result is MCP_RESULT_MAX_CHARS below, applied generically to every MCP call.
+TRACKER_MAX_SEARCH_PAGE_SIZE = 50
+
+# Generic bound on any single MCP tool result (SPEC-013 §14, "Bound external
+# data at several layers"). Applies to every MCP server, not just Tracker: a
+# third-party response must never be assumed small merely because the
+# request asked for fewer records or fields.
+MCP_RESULT_MAX_CHARS = 20_000
+
 # Local Chinook SQLite database (SPEC-008). Resolved relative to this file so the
 # paths hold regardless of the current working directory. The seed script is the
 # trusted source under version control; the runtime database is generated from it

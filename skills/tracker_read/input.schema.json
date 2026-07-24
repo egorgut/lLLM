@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TrackerReadInput",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The user's natural-language Tracker read request."
+    },
+    "issue_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*-[0-9]+$",
+      "description": "A known Tracker issue key, e.g. DATA-142."
+    },
+    "queue_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+      "description": "A known Tracker queue key, e.g. DATA."
+    }
+  },
+  "required": ["request"],
+  "additionalProperties": false
+}
