@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-013](../../specs/SPEC-013-External-MCP-Yandex-Tracker-Read-Only.md)
 - **Date:** 2026-07-24
 - **Branch:** feature/SPEC-013-tracker-mcp
-- **Merge commit:** _(recorded after merge)_
+- **Merge commit:** 3cee7d7
 
 ## Hypothesis / intent
 
