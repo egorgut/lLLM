@@ -149,6 +149,131 @@ Qwen: The current time in UTC is 11:29 on July 23, 2026.
 (`MCP startup failed for server 'time': ...`) и не оставляет дочерних процессов.
 Сессия и дочерний процесс закрываются детерминированно на `/bye`, EOF и `Ctrl+C`.
 
+### Yandex Tracker MCP — только чтение (SPEC-013)
+
+`time` — локальный, доверенный, демонстрационный сервер. Следующий шаг —
+подключение к **настоящему** внешнему бизнес-сервису:
+[`aikts/yandex-tracker-mcp`](https://github.com/aikts/yandex-tracker-mcp),
+который отдаёт по протоколу MCP широкий набор операций над Yandex Tracker,
+включая запись (создание/изменение задач, комментарии, переходы статусов и
+т.д.). Внешний сервер здесь трактуется как **недоверенный поставщик
+возможностей**: его каталог инструментов уменьшается host-политикой ещё до
+того, как что-либо становится видимым модели.
+
+Что доступно — ровно четыре инструмента, только чтение:
+
+```text
+mcp_tracker__issue_get              — прочитать одну задачу
+mcp_tracker__issues_find            — найти задачи по запросу (YTQL)
+mcp_tracker__queue_get_metadata     — прочитать метаданные очереди
+mcp_tracker__issue_get_comments     — прочитать комментарии к задаче
+```
+
+Всё остальное, что отдаёт `tools/list` upstream-сервера (создание/изменение
+задач, комментариев, переходов, ссылок, worklog'ов и т.д.), **отфильтровывается
+до регистрации** — точным allowlist'ом по имени, а не эвристикой по описанию
+или префиксу. Отфильтрованный инструмент никогда не получает `ToolSpec`,
+обработчик исполнителя или объявление модели — его нельзя вызвать даже прямым
+запросом текста от модели.
+
+**Требования** (только если интеграция включена):
+
+- установленный [`uv`/`uvx`](https://docs.astral.sh/uv/) — harness его не
+  ставит и не трогает системные инструменты;
+- токен Tracker с правом чтения (`TRACKER_TOKEN`);
+- ровно один идентификатор организации: `TRACKER_ORG_ID` (Yandex 360) или
+  `TRACKER_CLOUD_ORG_ID` (Yandex Cloud) — не оба сразу.
+
+Пакет закреплён на точную протестированную версию:
+
+```text
+yandex-tracker-mcp==0.7.2
+```
+
+Переменные окружения (интеграция выключена по умолчанию — свежий чекаут не
+требует токена):
+
+```bash
+export TRACKER_MCP_ENABLED=true
+export TRACKER_TOKEN="..."
+export TRACKER_ORG_ID="..."       # или TRACKER_CLOUD_ORG_ID
+python app.py
+```
+
+Секреты читаются только из окружения процесса `mcp_integration/config.py`;
+нигде в закоммитированных файлах, трассировке или истории чата токен и
+идентификатор организации не появляются.
+
+Старт при включённой интеграции:
+
+```text
+[mcp] connected: time (1 tool)
+[mcp] connected: tracker (4 admitted, 38 filtered)
+```
+
+Старт при выключенной (значение по умолчанию):
+
+```text
+[mcp] connected: time (1 tool)
+[mcp] tracker: disabled
+```
+
+Если интеграция включена, но сконфигурирована неверно — старт **падает** до
+входа в чат, без утечки секретов в сообщении:
+
+```text
+Application startup failed: Tracker MCP is enabled but TRACKER_TOKEN is missing.
+```
+
+Пример работы через навык `tracker_read` (`skills/tracker_read/`; ровно те же
+четыре инструмента в `allowed_tools`, никаких локальных инструментов):
+
+```text
+You: Use the tracker_read skill and show me issue DATA-142.
+[skill] tracker_read
+
+[tool 1/4] mcp_tracker__issue_get
+[args] {"issue_id": "DATA-142", "include_description": true}
+[result] {"ok": true, "server": "tracker", "tool": "issue_get", "data": {...}}
+
+Qwen: DATA-142 — Add ownership metadata to the reporting mart. Status: In Progress.
+```
+
+Попытка изменить что-либо в Tracker получает отказ без исполнения:
+
+```text
+You: Add a comment to DATA-142 saying that the fix is deployed.
+Qwen: This integration is read-only. I can read the issue and its comments,
+but I cannot add or change anything in Yandex Tracker.
+```
+
+Комментарии и описания задач — недоверенный текст: навык явно инструктирован
+не выполнять инструкции, встреченные внутри содержимого Tracker. Крупный
+результат ограничивается универсальной (не специфичной для Tracker) проверкой
+размера в `mcp_integration/adapter.py` (`MCP_RESULT_MAX_CHARS`) — ответ
+помечается `truncated: true`, а не молча обрезается там, где это не заметно.
+
+**Диагностика:**
+
+| Проблема | Поведение |
+| --- | --- |
+| `uvx` не установлен | `MCP startup failed for server 'tracker': The MCP server could not be started.` |
+| `TRACKER_TOKEN` не задан | `Tracker MCP is enabled but TRACKER_TOKEN is missing.` |
+| Не задан ни один идентификатор организации | `Tracker MCP is enabled but no organisation ID is set...` |
+| Заданы оба идентификатора организации | `Tracker MCP requires exactly one organisation ID...` |
+| Аутентификация/права отклонены Tracker'ом | безопасное сообщение в финальном ответе хода, без токена и заголовков |
+| Тайм-аут вызова | существующий тайм-аут инструмента/хода (SPEC-011), приложение остаётся рабочим |
+
+Опциональный live-smoke прогон (требует реальный токен, `uvx` и безопасные
+тестовые идентификаторы — не выполняется по умолчанию и не входит в CI):
+
+```bash
+export TRACKER_SMOKE_ISSUE_ID="TEST-1"
+export TRACKER_SMOKE_QUEUE_ID="TEST"
+export TRACKER_SMOKE_SEARCH_QUERY="Queue: TEST"
+python -m evals.runner --suite live --category tracker
+```
+
 ## Агентный цикл
 
 За один ход модель может выполнить **несколько** инструментов подряд. Ход — это
@@ -342,12 +467,21 @@ skills/
 
 Скриптованные оценки навыков — в `evals/cases.json` под категориями
 `skill_explicit`, `skill_auto`, `skill_none`, `skill_clarification`,
-`skill_policy_violation`, `skill_routing_repair` (безопасны для CI, без модели):
+`skill_policy_violation`, `skill_routing_repair`, а также двенадцать
+`tracker_*`-категорий для навыка `tracker_read` (SPEC-013; безопасны для CI,
+без модели):
 
 ```bash
 python -m evals.runner --suite scripted
-python -m evals.runner --suite live --category skills   # с реальной моделью (вручную)
+python -m evals.runner --suite live --category skills    # с реальной моделью (вручную)
+python -m evals.runner --suite live --category tracker   # live-smoke Tracker (см. ниже)
 ```
+
+Когда внешняя интеграция, от которой зависит навык, выключена (Tracker по
+умолчанию), сам навык **не загружается** как исполняемый — это не ошибка
+загрузчика, а детерминированный host-owned пропуск одного пакета
+(`SkillPackageLoader.load_all(..., omit={"tracker_read"})`), при этом
+остальные навыки продолжают валидироваться и загружаться как обычно.
 
 ## Конфигурация
 
@@ -381,6 +515,22 @@ MAX_SKILL_SCHEMA_BYTES = 100000
 MAX_SKILLS = 100
 MAX_SKILL_DESCRIPTION_CHARS = 200
 
+# Внешний Yandex Tracker MCP-сервер (SPEC-013) — выключен по умолчанию,
+# свежий чекаут не требует токена. Секреты (TRACKER_TOKEN, org id) читаются
+# из окружения только в mcp_integration/config.py, не отсюда.
+TRACKER_MCP_SERVER_ID = "tracker"
+TRACKER_MCP_COMMAND = "uvx"
+TRACKER_MCP_PACKAGE = "yandex-tracker-mcp==0.7.2"   # закреплённая версия, без @latest
+TRACKER_MCP_REQUIRED_TOOLS = frozenset({
+    "issue_get", "issues_find", "queue_get_metadata", "issue_get_comments",
+})
+TRACKER_MAX_SEARCH_PAGE_SIZE = 50   # ориентир для навыка, не жёсткий лимит аргумента
+
+# Универсальный предел размера результата MCP-вызова (SPEC-013) — для любого
+# сервера, не только Tracker: большой ответ помечается truncated=true, а не
+# передаётся модели целиком.
+MCP_RESULT_MAX_CHARS = 20000
+
 CHINOOK_SEED_PATH = ...     # доверенный seed под контролем версий
 SQLITE_DATABASE_PATH = ...  # сгенерированная база (в git не хранится)
 ```
@@ -400,9 +550,9 @@ SQLITE_DATABASE_PATH = ...  # сгенерированная база (в git н
 | `config.py`       | Хост Ollama, имя модели, лимиты цикла/дедлайнов, настройки трассировки |
 | `tools/`          | Инструменты: реестр (`ToolSpec`/`ToolRegistry`), исполнитель (`ToolExecutor`), `python_calculate` и `sql_query` |
 | `skill_runtime/`  | Рантайм навыков (SPEC-012): модели, загрузчик/валидатор, реестр, роутер, композиция промпта, политика инструментов, оркестратор хода |
-| `skills/`         | Декларативные пакеты навыков (`sales_analysis/`: `SKILL.md`, `input.schema.json`, `examples/`, `evals/`) |
+| `skills/`         | Декларативные пакеты навыков (`sales_analysis/`, `tracker_read/`: `SKILL.md`, `input.schema.json`, `examples/`, `evals/`) |
 | `mcp_servers/`    | Локальные MCP-серверы: `time_server.py` (инструмент `get_current_time` по stdio) |
-| `mcp_integration/`| MCP host-сторона: `client.py` (менеджер сессии), `adapter.py` (конвертация имён/схем/результатов) |
+| `mcp_integration/`| MCP host-сторона: `client.py` (менеджер сессии), `adapter.py` (конвертация имён/схем/результатов, ограничение размера), `policy.py` (точный allowlist-фильтр, SPEC-013), `config.py` (валидированная конфигурация серверов + загрузчик Tracker-окружения, SPEC-013) |
 | `scripts/`        | Утилиты: `init_database.py` — сборка Chinook SQLite из seed |
 | `data/seed/`      | Доверенный seed-скрипт Chinook (`Chinook_Sqlite.sql`)     |
 | `tests/`          | Детерминированный набор pytest (без живой модели/MCP/БД)  |

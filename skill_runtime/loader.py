@@ -78,7 +78,26 @@ class SkillPackageLoader:
     max_skills: int = MAX_SKILLS
     max_description_chars: int = MAX_SKILL_DESCRIPTION_CHARS
 
-    def load_all(self, skills_root: Path, tool_registry: ToolRegistry) -> SkillRegistry:
+    def load_all(
+        self,
+        skills_root: Path,
+        tool_registry: ToolRegistry,
+        *,
+        omit: frozenset[str] = frozenset(),
+    ) -> SkillRegistry:
+        """Discover, validate, and register every package under ``skills_root``.
+
+        ``omit`` names packages to skip entirely -- SKILL.md parsing,
+        tool-reference validation, and registration -- because their declared
+        tools are known in advance to be unavailable this run (e.g. a skill
+        depending on a disabled optional integration; SPEC-013
+        §"Tracker integration is disabled"). This is a narrow, explicit,
+        host-owned skip, not a general "ignore unknown tools" relaxation: an
+        omitted package still undergoes every structural, tool-independent
+        check below (symlink rejection, directory-name pattern, MAX_SKILLS
+        count), and every *other* package's fail-fast validation is unchanged.
+        """
+
         registry = SkillRegistry()
         root = Path(skills_root)
         # A missing root is a valid development state: no skills, no routing
@@ -115,7 +134,14 @@ class SkillPackageLoader:
                 f"MAX_SKILLS={self.max_skills}."
             )
 
+        # Directory-name validity is a cheap, tool-independent structural
+        # check, so it applies to every discovered package, omitted or not.
         for package_dir in package_dirs:
+            _validate_package_name(package_dir.name)
+
+        for package_dir in package_dirs:
+            if package_dir.name in omit:
+                continue
             spec = self._load_package(package_dir, resolved_root, tool_registry)
             try:
                 registry.register(spec)
@@ -126,12 +152,9 @@ class SkillPackageLoader:
     def _load_package(
         self, package_dir: Path, resolved_root: Path, tool_registry: ToolRegistry
     ) -> SkillSpec:
+        # Directory-name validity was already checked for every discovered
+        # package in load_all(), including omitted ones.
         package_name = package_dir.name
-        if not _NAME_PATTERN.fullmatch(package_name):
-            raise SkillPackageError(
-                f"Invalid skill package directory name: {package_name!r} "
-                f"(must match {_NAME_PATTERN.pattern})."
-            )
 
         skill_md = self._require_inside(package_dir / "SKILL.md", resolved_root, package_name)
         schema_path = self._require_inside(
@@ -195,6 +218,14 @@ class SkillPackageLoader:
                 f"Skill '{package_name}' path escapes the skills root: {path.name}."
             )
         return path
+
+
+def _validate_package_name(package_name: str) -> None:
+    if not _NAME_PATTERN.fullmatch(package_name):
+        raise SkillPackageError(
+            f"Invalid skill package directory name: {package_name!r} "
+            f"(must match {_NAME_PATTERN.pattern})."
+        )
 
 
 def _read_text(path: Path, package_name: str, label: str) -> str:

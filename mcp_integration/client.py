@@ -20,20 +20,21 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from mcp_integration.adapter import (
-    McpAdapterError,
-    namespace_name,
-    normalize_result,
-    to_tool_spec,
-)
+from mcp_integration.adapter import McpAdapterError, normalize_result
+from mcp_integration.policy import McpAdmissionError, filter_discovered_tools
 from tools import ToolSpec
+from tracing import NullTraceSink, SafeTraceSink, TraceSink, build_event
+
+if TYPE_CHECKING:
+    from mcp_integration.config import McpServerConfig
 
 # Bounds so a wedged child can never hang the CLI indefinitely. The call
 # timeout is host-configurable (SPEC-011 §10); the other two are internal
@@ -59,11 +60,16 @@ class McpStartupError(Exception):
 class McpClientManager:
     def __init__(
         self,
-        servers_config: dict[str, dict[str, Any]],
+        servers_config: dict[str, "McpServerConfig"],
         call_timeout: float = _DEFAULT_CALL_TIMEOUT,
+        *,
+        run_id: str,
+        trace_sink: TraceSink = NullTraceSink(),
     ) -> None:
         self._servers_config = servers_config
         self._call_timeout = call_timeout
+        self._run_id = run_id
+        self._trace = SafeTraceSink(trace_sink, run_id)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
@@ -76,6 +82,7 @@ class McpClientManager:
         self._route_map: dict[str, tuple[str, str]] = {}
         self._specs: list[ToolSpec] = []
         self._counts: dict[str, int] = {}
+        self._filtered_counts: dict[str, int] = {}
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -92,10 +99,22 @@ class McpClientManager:
         self._thread.start()
 
         for server_id, cfg in self._servers_config.items():
+            if not cfg.enabled:
+                continue
+
+            self._trace.emit(
+                build_event(
+                    "mcp_server_starting",
+                    run_id=self._run_id,
+                    server=server_id,
+                    transport="stdio",
+                )
+            )
+            started_at = time.monotonic()
             params = StdioServerParameters(
-                command=cfg["command"],
-                args=list(cfg.get("args", [])),
-                env=cfg.get("env"),
+                command=cfg.command,
+                args=list(cfg.args),
+                env=dict(cfg.env) if cfg.env else None,
             )
             ready: ThreadFuture[list[Any]] = ThreadFuture()
             asyncio.run_coroutine_threadsafe(
@@ -121,27 +140,78 @@ class McpClientManager:
                     "The MCP server could not be started.",
                 )
 
-            self._register_discovered(server_id, tools)
+            self._register_discovered(server_id, tools, cfg, started_at=started_at)
 
-    def _register_discovered(self, server_id: str, tools: list[Any]) -> None:
-        count = 0
-        for tool in tools:
-            try:
-                model_facing = namespace_name(server_id, tool.name)
-                spec = to_tool_spec(model_facing, tool)
-            except McpAdapterError as exc:
-                raise McpStartupError(exc.error_type, server_id, str(exc)) from exc
+    def _register_discovered(
+        self, server_id: str, tools: list[Any], cfg: "McpServerConfig", *, started_at: float
+    ) -> None:
+        try:
+            result = filter_discovered_tools(
+                server_id,
+                tools,
+                allowed_tools=cfg.allowed_tools,
+                required_tools=cfg.required_tools,
+            )
+        except (McpAdmissionError, McpAdapterError) as exc:
+            raise McpStartupError(exc.error_type, server_id, str(exc)) from exc
 
+        if result.missing_required_names:
+            raise McpStartupError(
+                "mcp_required_tool_missing",
+                server_id,
+                "MCP server does not advertise required tool(s): "
+                + ", ".join(sorted(result.missing_required_names))
+                + ".",
+            )
+
+        for model_facing, sid, upstream_name in result.route_entries:
             if model_facing in self._route_map:
                 raise McpStartupError(
                     "mcp_tool_name_collision",
                     server_id,
                     f"Duplicate MCP tool name: {model_facing}.",
                 )
-            self._route_map[model_facing] = (server_id, tool.name)
-            self._specs.append(spec)
-            count += 1
-        self._counts[server_id] = count
+            self._route_map[model_facing] = (sid, upstream_name)
+            self._trace.emit(
+                build_event(
+                    "mcp_tool_admitted",
+                    run_id=self._run_id,
+                    server=server_id,
+                    tool=model_facing,
+                )
+            )
+
+        self._specs.extend(result.admitted_specs)
+        self._counts[server_id] = len(result.admitted_specs)
+        self._filtered_counts[server_id] = len(result.filtered_names)
+
+        # One bounded summary event rather than one event per filtered tool:
+        # the real upstream catalog can carry dozens of non-admitted tools,
+        # and their names alone are not secrets, but a per-tool stream would
+        # add startup trace volume with no behavioral value.
+        if result.filtered_names:
+            self._trace.emit(
+                build_event(
+                    "mcp_tool_filtered",
+                    run_id=self._run_id,
+                    server=server_id,
+                    filtered_count=len(result.filtered_names),
+                    filtered_preview=list(result.filtered_names[:20]),
+                )
+            )
+
+        self._trace.emit(
+            build_event(
+                "mcp_server_ready",
+                run_id=self._run_id,
+                server=server_id,
+                discovered_count=len(tools),
+                admitted_count=len(result.admitted_specs),
+                filtered_count=len(result.filtered_names),
+                required_count=len(cfg.required_tools),
+                startup_duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
+        )
 
     def _run_loop(self) -> None:
         # Hold a local reference: close() clears self._loop from the main thread,
@@ -254,10 +324,30 @@ class McpClientManager:
         return list(self._specs)
 
     def server_summaries(self) -> list[str]:
+        """One human-readable line per *configured* server, disabled or not.
+
+        A server with no allowlist (``allowed_tools is None``, e.g. the
+        trusted local ``time`` reference server) reports a plain tool count,
+        matching its historical unfiltered wording. A server with an
+        allowlist (any external server, e.g. Tracker) reports admitted and
+        filtered counts so an operator can see the policy boundary at a
+        glance.
+        """
+
         summaries = []
-        for server_id, count in self._counts.items():
-            noun = "tool" if count == 1 else "tools"
-            summaries.append(f"{server_id} ({count} {noun})")
+        for server_id, cfg in self._servers_config.items():
+            if not cfg.enabled:
+                summaries.append(f"{server_id}: disabled")
+                continue
+            admitted = self._counts.get(server_id, 0)
+            if cfg.allowed_tools is None:
+                noun = "tool" if admitted == 1 else "tools"
+                summaries.append(f"connected: {server_id} ({admitted} {noun})")
+            else:
+                filtered = self._filtered_counts.get(server_id, 0)
+                summaries.append(
+                    f"connected: {server_id} ({admitted} admitted, {filtered} filtered)"
+                )
         return summaries
 
     # -- execution -----------------------------------------------------------
