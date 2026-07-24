@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "skill": "sales_analysis",
+  "cases": [
+    {
+      "id": "revenue-by-genre",
+      "user_message": "Which genre generated the most revenue?",
+      "expected_selection": "sales_analysis",
+      "expected_tools": ["sql_query"],
+      "forbidden_tools": ["mcp_time__get_current_time"],
+      "expected_status": "completed",
+      "expected_answer_contains": ["revenue"]
+    },
+    {
+      "id": "revenue-share",
+      "user_message": "What percentage of total revenue did the top genre generate?",
+      "expected_selection": "sales_analysis",
+      "expected_tools": ["sql_query"],
+      "forbidden_tools": ["mcp_time__get_current_time"],
+      "expected_status": "completed",
+      "expected_answer_contains": ["%"]
+    },
+    {
+      "id": "analyse-sales-clarification",
+      "user_message": "Analyse sales.",
+      "expected_selection": "sales_analysis",
+      "expected_tools": [],
+      "forbidden_tools": ["sql_query", "python_calculate"],
+      "expected_status": "completed"
+    },
+    {
+      "id": "utc-time-no-skill",
+      "user_message": "What time is it in UTC?",
+      "expected_selection": null,
+      "expected_status": "completed"
+    }
+  ]
+}

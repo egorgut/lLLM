@@ -41,6 +41,13 @@ class TerminationReason(StrEnum):
     TOOL_EXECUTION_ERROR = "tool_execution_error"
     USER_INTERRUPT = "user_interrupt"
     INTERNAL_ERROR = "internal_error"
+    # Skill layer (SPEC-012). Routing runs before the agent loop but shares the
+    # same whole-turn budget; a routing failure is a first-class terminal reason.
+    SKILL_ROUTING_TIMEOUT = "skill_routing_timeout"
+    SKILL_ROUTING_ERROR = "skill_routing_error"
+    INVALID_SKILL_SELECTION = "invalid_skill_selection"
+    SKILL_LOAD_ERROR = "skill_load_error"
+    SKILL_POLICY_VIOLATION = "skill_policy_violation"
 
 
 # The authoritative status for every termination reason (SPEC-011, "Detailed
@@ -58,6 +65,13 @@ STATUS_BY_REASON: dict[TerminationReason, TurnStatus] = {
     TerminationReason.TOOL_EXECUTION_ERROR: TurnStatus.FAILED,
     TerminationReason.USER_INTERRUPT: TurnStatus.CANCELLED,
     TerminationReason.INTERNAL_ERROR: TurnStatus.FAILED,
+    # A routing timeout is a timeout; a policy violation is a deliberate stop;
+    # every other skill failure is a plain failure (SPEC-012 §17).
+    TerminationReason.SKILL_ROUTING_TIMEOUT: TurnStatus.TIMED_OUT,
+    TerminationReason.SKILL_ROUTING_ERROR: TurnStatus.FAILED,
+    TerminationReason.INVALID_SKILL_SELECTION: TurnStatus.FAILED,
+    TerminationReason.SKILL_LOAD_ERROR: TurnStatus.FAILED,
+    TerminationReason.SKILL_POLICY_VIOLATION: TurnStatus.STOPPED,
 }
 
 
@@ -75,6 +89,11 @@ USER_MESSAGE_BY_REASON: dict[TerminationReason, str | None] = {
     TerminationReason.TOOL_EXECUTION_ERROR: "Tool execution failed.",
     TerminationReason.USER_INTERRUPT: "Generation interrupted.",
     TerminationReason.INTERNAL_ERROR: "Unexpected application error.",
+    TerminationReason.SKILL_ROUTING_TIMEOUT: "Skill routing timed out.",
+    TerminationReason.SKILL_ROUTING_ERROR: "Skill routing failed.",
+    TerminationReason.INVALID_SKILL_SELECTION: "Skill routing returned an invalid selection.",
+    TerminationReason.SKILL_LOAD_ERROR: "The selected skill could not be loaded.",
+    TerminationReason.SKILL_POLICY_VIOLATION: "The skill attempted a tool outside its allowlist.",
 }
 
 
@@ -97,6 +116,23 @@ class AgentTurnOutcome:
     model_requests: int
     duration_ms: int
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    """The host-owned identity and time budget for one user turn (SPEC-012 §18-19).
+
+    Created once, before skill routing, so routing and the subsequent agent
+    execution share a single ``run_id``/``turn_id`` and a single whole-turn
+    ``deadline``. A skill-backed turn therefore never gets a fresh independent
+    budget after routing: ``deadline`` is absolute (same clock as ``started_at``)
+    and both phases check the remaining time against it.
+    """
+
+    run_id: str
+    turn_id: str
+    started_at: float
+    deadline: float
 
 
 class AgentRuntimeError(Exception):
@@ -131,6 +167,37 @@ class RepeatedToolCallError(AgentRuntimeError):
     def __init__(self, message: str, *, repeat_count: int) -> None:
         super().__init__(TerminationReason.REPEATED_TOOL_CALL, message)
         self.repeat_count = repeat_count
+
+
+class SkillRoutingTimeout(AgentRuntimeError):
+    def __init__(self, message: str) -> None:
+        super().__init__(TerminationReason.SKILL_ROUTING_TIMEOUT, message)
+
+
+class SkillRoutingError(AgentRuntimeError):
+    def __init__(self, message: str) -> None:
+        super().__init__(TerminationReason.SKILL_ROUTING_ERROR, message)
+
+
+class InvalidSkillSelection(AgentRuntimeError):
+    def __init__(self, message: str) -> None:
+        super().__init__(TerminationReason.INVALID_SKILL_SELECTION, message)
+
+
+class SkillLoadError(AgentRuntimeError):
+    def __init__(self, message: str) -> None:
+        super().__init__(TerminationReason.SKILL_LOAD_ERROR, message)
+
+
+class SkillPolicyViolation(AgentRuntimeError):
+    """Raised when a turn tries to call a tool outside the selected skill's
+    allowlist. The runtime executor guard raises this *before* the underlying
+    handler runs, so a disallowed tool never executes (SPEC-012 §9)."""
+
+    def __init__(self, message: str, *, requested_tool: str, skill: str) -> None:
+        super().__init__(TerminationReason.SKILL_POLICY_VIOLATION, message)
+        self.requested_tool = requested_tool
+        self.skill = skill
 
 
 def new_id() -> str:

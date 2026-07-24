@@ -7,10 +7,73 @@ scripted scenarios.
 """
 
 from llm import ModelToolCall
+from tools import ToolRegistry, ToolSpec
 
 
 def make_tool_call(name: str, arguments: dict) -> ModelToolCall:
     return ModelToolCall(id=None, name=name, arguments=arguments)
+
+
+def make_tool_registry(*names: str) -> ToolRegistry:
+    """A real `ToolRegistry` populated with trivial tools for skill tests.
+
+    Skill validation and tool filtering need a registry that answers `in`,
+    `.get`, and declaration rendering; the tool *behavior* is irrelevant here.
+    """
+
+    registry = ToolRegistry()
+    for name in names:
+        registry.register(
+            ToolSpec(
+                name=name,
+                description=f"Test tool {name}.",
+                input_schema={"type": "object", "properties": {}},
+                output_schema={"type": "object", "properties": {}},
+            )
+        )
+    return registry
+
+
+class ScriptedRouteFn:
+    """A `RouteFn` (messages -> raw text) that plays back a fixed script.
+
+    Each item is either a `str` to return or a `BaseException` to raise (for the
+    transport-failure scenario). Every call's messages snapshot is recorded so a
+    test can assert the router never received full skill instructions and that a
+    repair request carried the required context.
+    """
+
+    def __init__(self, responses) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict]] = []
+
+    def __call__(self, messages) -> str:
+        self.calls.append(list(messages))
+        if not self._responses:
+            raise AssertionError("ScriptedRouteFn ran out of scripted responses.")
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class ScriptedSkillRouter:
+    """A stand-in `SkillRouter` for orchestrator/turn tests.
+
+    Returns a preset `SkillSelection` or raises a preset `AgentRuntimeError`,
+    recording the keyword arguments it was called with so a test can assert the
+    router saw the shared deadline and bounded context.
+    """
+
+    def __init__(self, result) -> None:
+        self._result = result
+        self.calls: list[dict] = []
+
+    def select(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self._result, BaseException):
+            raise self._result
+        return self._result
 
 
 class ScriptedModelResponse:

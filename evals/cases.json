@@ -175,5 +175,133 @@
       "status": "timed_out",
       "reason": "model_timeout"
     }
+  },
+  {
+    "id": "skill-explicit-001",
+    "category": "skill_explicit",
+    "modes": ["scripted"],
+    "skill_case": true,
+    "prompt": "Use the sales_analysis skill to find which genre earns the most revenue.",
+    "route": [],
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT g.Name, SUM(il.UnitPrice*il.Quantity) AS r FROM InvoiceLine il JOIN Track t ON il.TrackId=t.TrackId JOIN Genre g ON t.GenreId=g.GenreId GROUP BY g.Name ORDER BY r DESC LIMIT 1"}}},
+      {"text": "Rock generated the most revenue: $826.65. Basis: revenue = UnitPrice x Quantity, grouped by genre. Limitation: local Chinook sample database."}
+    ],
+    "tool_results": {
+      "sql_query": {"ok": true, "columns": ["Name", "r"], "rows": [["Rock", 826.65]], "row_count": 1, "truncated": false}
+    },
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "selection_source": "explicit",
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["sql_query"],
+      "forbidden_tools": ["mcp_time__get_current_time"],
+      "answer_contains": ["revenue"]
+    }
+  },
+  {
+    "id": "skill-auto-multitool-001",
+    "category": "skill_auto",
+    "modes": ["scripted"],
+    "skill_case": true,
+    "prompt": "What percentage of total revenue did the top genre generate?",
+    "route": ["{\"skill\": \"sales_analysis\", \"reason\": \"revenue share analysis\"}"],
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT (SELECT SUM(UnitPrice*Quantity) FROM InvoiceLine) AS total, 826.65 AS top"}}},
+      {"tool_call": {"name": "python_calculate", "arguments": {"expression": "826.65 / 2328.60 * 100"}}},
+      {"text": "Rock generated about 35.5% of total revenue. Basis: top-genre revenue / total invoice-line revenue (the denominator)."}
+    ],
+    "tool_results": {
+      "sql_query": {"ok": true, "columns": ["total", "top"], "rows": [[2328.60, 826.65]], "row_count": 1, "truncated": false},
+      "python_calculate": {"ok": true, "result": 35.5}
+    },
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "selection_source": "model",
+      "status": "completed",
+      "required_tools": ["sql_query", "python_calculate"],
+      "forbidden_tools": ["mcp_time__get_current_time"],
+      "answer_contains": ["%"]
+    }
+  },
+  {
+    "id": "skill-none-001",
+    "category": "skill_none",
+    "modes": ["scripted"],
+    "skill_case": true,
+    "prompt": "In one sentence, what is a bounded agent loop?",
+    "route": ["{\"skill\": null, \"reason\": \"general conceptual question, no specialized skill needed\"}"],
+    "script": [
+      {"text": "A bounded agent loop lets the model call tools and answer, capped by host-owned limits on tool calls and time."}
+    ],
+    "expectation": {
+      "expected_selection": null,
+      "selection_source": "model",
+      "status": "completed",
+      "reason": "final_answer",
+      "max_tool_calls": 0
+    }
+  },
+  {
+    "id": "skill-clarification-001",
+    "category": "skill_clarification",
+    "modes": ["scripted"],
+    "skill_case": true,
+    "prompt": "Analyse sales.",
+    "route": ["{\"skill\": \"sales_analysis\", \"reason\": \"sales analysis request\"}"],
+    "script": [
+      {"text": "Which sales metric and period should I analyse?"}
+    ],
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "selection_source": "model",
+      "status": "completed",
+      "reason": "final_answer",
+      "forbidden_tools": ["sql_query", "python_calculate", "mcp_time__get_current_time"],
+      "max_tool_calls": 0,
+      "answer_contains": ["metric"]
+    }
+  },
+  {
+    "id": "skill-policy-violation-001",
+    "category": "skill_policy_violation",
+    "modes": ["scripted"],
+    "skill_case": true,
+    "prompt": "Within sales analysis, tell me the current UTC time.",
+    "route": ["{\"skill\": \"sales_analysis\", \"reason\": \"routed to sales analysis\"}"],
+    "script": [
+      {"tool_call": {"name": "mcp_time__get_current_time", "arguments": {}}}
+    ],
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "selection_source": "model",
+      "status": "stopped",
+      "reason": "skill_policy_violation",
+      "forbidden_tools": ["mcp_time__get_current_time"]
+    }
+  },
+  {
+    "id": "skill-routing-repair-001",
+    "category": "skill_routing_repair",
+    "modes": ["scripted"],
+    "skill_case": true,
+    "prompt": "Compare the top five genres by revenue.",
+    "route": ["I think this is sales analysis", "{\"skill\": \"sales_analysis\", \"reason\": \"revenue comparison\"}"],
+    "script": [
+      {"tool_call": {"name": "sql_query", "arguments": {"query": "SELECT g.Name, SUM(il.UnitPrice*il.Quantity) AS r FROM InvoiceLine il JOIN Track t ON il.TrackId=t.TrackId JOIN Genre g ON t.GenreId=g.GenreId GROUP BY g.Name ORDER BY r DESC LIMIT 5"}}},
+      {"text": "Top five genres by revenue: Rock, Latin, Metal, Alternative & Punk, TV Shows. Basis: revenue = UnitPrice x Quantity grouped by genre."}
+    ],
+    "tool_results": {
+      "sql_query": {"ok": true, "columns": ["Name", "r"], "rows": [["Rock", 826.65], ["Latin", 382.14], ["Metal", 261.36], ["Alternative & Punk", 241.56], ["TV Shows", 93.53]], "row_count": 5, "truncated": false}
+    },
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "selection_source": "model",
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": ["sql_query"],
+      "forbidden_tools": ["mcp_time__get_current_time"]
+    }
   }
 ]

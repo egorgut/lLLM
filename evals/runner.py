@@ -33,19 +33,27 @@ from agent import AgentRunner
 from config import (
     AGENT_TURN_TIMEOUT_SECONDS,
     MAX_IDENTICAL_TOOL_CALLS,
+    MAX_SKILL_ROUTING_RESPONSE_CHARS,
     MAX_TOOL_CALLS_PER_TURN,
     MCP_SERVERS,
     MODEL_NAME,
     MODEL_REQUEST_TIMEOUT_SECONDS,
+    SKILL_ROUTING_REPAIR_ATTEMPTS,
+    SKILL_ROUTING_TIMEOUT_SECONDS,
+    SKILLS_ROOT,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
 )
+from conversation import Conversation
 from reliability import TurnStatus, new_id
+from skill_runtime import SkillPackageLoader, SkillRouter, SkillTurnOrchestrator
 from tests.support import (
     FakeToolExecutor,
     RecordingRenderer,
     ScriptedModelResponse,
     ScriptedResponder,
+    ScriptedRouteFn,
     make_tool_call,
+    make_tool_registry,
 )
 from tracing import NullTraceSink
 
@@ -64,6 +72,9 @@ class CaseResult:
     tool_calls: list[str]
     duration_ms: int
     failures: list[str] = field(default_factory=list)
+    selected_skill: str | None = None
+    selection_source: str | None = None
+    routing_requests: int | None = None
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -71,11 +82,35 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
 
 
 def evaluate_expectation(
-    outcome, tool_calls_used: list[str], expectation: dict[str, Any]
+    outcome, tool_calls_used: list[str], expectation: dict[str, Any], selection=None
 ) -> list[str]:
-    """Objective, deterministic assertions only -- no LLM judge (SPEC-011 §6)."""
+    """Objective, deterministic assertions only -- no LLM judge (SPEC-011 §6).
+
+    `selection` (a `SkillSelection`, present only for skill cases) enables the
+    skill-specific keys `expected_selection` and `selection_source` (SPEC-012).
+    """
 
     failures: list[str] = []
+
+    if "expected_selection" in expectation:
+        got = selection.skill_name if selection is not None else None
+        if got != expectation["expected_selection"]:
+            failures.append(
+                f"expected selection={expectation['expected_selection']!r}, got {got!r}"
+            )
+
+    if "selection_source" in expectation and selection is not None:
+        if selection.source != expectation["selection_source"]:
+            failures.append(
+                f"expected selection_source={expectation['selection_source']!r}, "
+                f"got {selection.source!r}"
+            )
+
+    if "forbidden_tools" in expectation:
+        forbidden = set(expectation["forbidden_tools"])
+        used = [t for t in tool_calls_used if t in forbidden]
+        if used:
+            failures.append(f"forbidden tool calls used: {used}")
 
     if "status" in expectation and str(outcome.status) != expectation["status"]:
         failures.append(f"expected status={expectation['status']!r}, got {outcome.status!r}")
@@ -210,6 +245,72 @@ def run_scripted_case(case: dict[str, Any]) -> CaseResult:
     )
 
 
+def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
+    """A scripted skill turn through the real `SkillTurnOrchestrator`.
+
+    The router is the real one driven by a scripted `RouteFn` (or bypassed by an
+    explicit request in the prompt); the reference skills under `skills/` are
+    loaded and validated for real. No live Ollama, MCP, or database is involved.
+    """
+
+    tool_registry = make_tool_registry(
+        "sql_query", "python_calculate", "mcp_time__get_current_time"
+    )
+    skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, tool_registry)
+    executor = FakeToolExecutor(
+        {
+            name: _tool_result_handler(results)
+            for name, results in case.get("tool_results", {}).items()
+        }
+    )
+    router = SkillRouter(
+        ScriptedRouteFn(list(case.get("route", []))),
+        timeout_seconds=SKILL_ROUTING_TIMEOUT_SECONDS,
+        max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
+        repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
+    )
+    responder = ScriptedResponder(
+        [_build_scripted_response(item) for item in case.get("script", [])]
+    )
+    orchestrator = SkillTurnOrchestrator(
+        skill_registry=skill_registry,
+        router=router,
+        tool_registry=tool_registry,
+        executor=executor,
+        respond=responder,
+        renderer_factory=RecordingRenderer,
+        default_tools=tool_registry.to_ollama_tools(),
+        run_id="eval-scripted",
+        max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+        max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
+        model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+        tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
+        agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+        trace_sink=NullTraceSink(),
+    )
+
+    conversation = Conversation()
+    conversation.add_user_message(case["prompt"])
+    result = orchestrator.run_turn(conversation)
+
+    tool_calls_used = [name for name, _ in executor.calls]
+    failures = evaluate_expectation(
+        result.outcome, tool_calls_used, case["expectation"], selection=result.selection
+    )
+    return CaseResult(
+        id=case["id"],
+        passed=not failures,
+        status=str(result.outcome.status),
+        reason=str(result.outcome.reason),
+        tool_calls=tool_calls_used,
+        duration_ms=result.outcome.duration_ms,
+        failures=failures,
+        selected_skill=result.selection.skill_name,
+        selection_source=result.selection.source,
+        routing_requests=result.selection.routing_requests,
+    )
+
+
 class _RecordingExecutorWrapper:
     """Wraps the real `ToolExecutor` so the live suite can see which tools ran,
     without changing the production dispatch path itself."""
@@ -321,7 +422,12 @@ def run_suite(suite: str, cases_path: Path) -> tuple[dict[str, int], list[CaseRe
     applicable = [case for case in cases if suite in case.get("modes", ["scripted", "live"])]
 
     if suite == "scripted":
-        results = [run_scripted_case(case) for case in applicable]
+        results = [
+            run_scripted_skill_case(case)
+            if case.get("skill_case")
+            else run_scripted_case(case)
+            for case in applicable
+        ]
     elif suite == "live":
         results = _run_live_cases(applicable)
     else:
@@ -354,6 +460,9 @@ def write_results(
                 "passed": result.passed,
                 "status": result.status,
                 "reason": result.reason,
+                "selected_skill": result.selected_skill,
+                "selection_source": result.selection_source,
+                "routing_requests": result.routing_requests,
                 "tool_calls": result.tool_calls,
                 "duration_ms": result.duration_ms,
                 "failures": result.failures,
