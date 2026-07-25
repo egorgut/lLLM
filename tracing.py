@@ -40,6 +40,18 @@ def build_event(event: str, *, run_id: str, **fields: Any) -> dict[str, Any]:
     }
 
 
+def trace_file_path(directory: str | Path, run_id: str) -> Path:
+    """The per-run trace file path: one file per run, not one shared file.
+
+    Isolating each run in its own file avoids two concurrent processes ever
+    appending to the same path, and keeps correlation to a single run a
+    matter of picking the file rather than filtering a shared one
+    (PATCH-011-01).
+    """
+
+    return Path(directory) / f"agent-{run_id}.jsonl"
+
+
 def preview_and_hash(value: Any, *, limit: int) -> tuple[str, str, bool]:
     """A size-bounded preview of `value` plus a stable hash of the full value.
 

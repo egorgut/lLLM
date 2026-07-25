@@ -254,3 +254,47 @@ every journal entry since SPEC-007 had flagged.
 - `VERBOSE_AGENT_DIAGNOSTICS` (optional per spec) was not implemented.
 - Retry policy for timed-out operations, once any tool has side effects
   (SPEC-011 explicitly performs no automatic retries).
+
+## Patches
+
+### PATCH-011-01 — Per-Session Trace File
+
+#### Reason
+
+Every run appended to one shared, ever-growing `data/traces/agent.jsonl`.
+Correlating a single session's events meant filtering that file by `run_id`,
+and two concurrent `app.py` processes both appending to the same path relied
+on OS-level short-write behavior rather than any guarantee this codebase
+made.
+
+#### Change
+
+Added `tracing.trace_file_path(directory, run_id)`, which builds
+`agent-<run_id>.jsonl` under a directory. `config.TRACE_PATH` (one file)
+became `config.TRACE_DIR` (a directory); `app.py` now opens
+`trace_file_path(TRACE_DIR, run_id)` per run instead of one shared constant
+path. `JsonlTraceSink` itself is unchanged — it already accepted an
+arbitrary path — so the append-only, one-JSON-object-per-line, no-full-file-
+rewrite contract from SPEC-011 §4 is untouched; only file granularity moved
+from "one file forever" to "one file per run". README's tracing section and
+config example were updated to match.
+
+#### Verification
+
+- `python -m pytest tests/test_tracing.py -q` — 17 passed, including new
+  `TestTraceFilePath` cases (directory + `run_id` → `agent-<run_id>.jsonl`;
+  distinct `run_id`s → distinct paths; accepts a string directory).
+- `python -m pytest -q` — full suite, 240 passed, no regression.
+- Manual check: ran `python app.py` twice (immediate EOF via `< /dev/null`).
+  Two distinct files appeared,
+  `agent-657ceab1-1b18-429f-9f2f-9755cbb0fa60.jsonl` and
+  `agent-fb92da5f-a360-4de2-aee2-2bf60036f7a7.jsonl`; a script confirmed each
+  file contains exactly one distinct `run_id`, matching its filename.
+- No model-facing behavior touched (tracing is orthogonal to model
+  decisions), so no live-model verification was required.
+
+#### Outcome
+
+Acceptance criteria met. Old shared `agent.jsonl` files from before this
+patch are harmless leftovers (git-ignored, no longer written to); no
+migration or cleanup of pre-existing trace files was needed.

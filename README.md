@@ -359,18 +359,21 @@ AGENT_TURN_TIMEOUT_SECONDS = 180
 исполняется, и ход завершается с `repeated_tool_call` — раньше, чем сработал
 бы общий лимит `MAX_TOOL_CALLS_PER_TURN`.
 
-**Трассировка.** Каждый ход пишет структурированный локальный след в
-`data/traces/agent.jsonl` — по одной JSON-строке на событие
-(`turn_started`, `model_request_started`/`model_response_finished`,
-`tool_call_requested`, `tool_execution_started`/`tool_execution_finished`,
-`policy_violation`, `turn_finished`, ...), с версией схемы, временем UTC,
-`run_id`/`turn_id` и длительностями. Большие или чувствительные данные не
-копируются целиком — аргументы инструментов и текст ответа обрезаются
+**Трассировка.** Каждый запуск `python app.py` пишет структурированный
+локальный след в свой собственный файл, `data/traces/agent-<run_id>.jsonl`
+(PATCH-011-01) — по одной JSON-строке на событие (`turn_started`,
+`model_request_started`/`model_response_finished`, `tool_call_requested`,
+`tool_execution_started`/`tool_execution_finished`, `policy_violation`,
+`turn_finished`, ...), с версией схемы, временем UTC, `run_id`/`turn_id` и
+длительностями. Большие или чувствительные данные не копируются целиком —
+аргументы инструментов и текст ответа обрезаются
 (`TRACE_PAYLOAD_PREVIEW_CHARS`), строки результатов SQL и сырые кадры MCP в
-след не попадают. Файл — локальный, добавление-only, в git не хранится:
+след не попадают. Файлы — локальные, добавление-only, в git не хранятся:
 
 ```bash
-tail -n 20 data/traces/agent.jsonl
+tail -n 20 data/traces/agent-<run_id>.jsonl
+# или проще — последний по времени изменения файл:
+tail -n 20 "$(ls -t data/traces/agent-*.jsonl | head -1)"
 ```
 
 Если запись следа не удалась, это не ломает ход и не подменяет его реальный
@@ -506,9 +509,10 @@ TOOL_EXECUTION_TIMEOUT_SECONDS = 30
 AGENT_TURN_TIMEOUT_SECONDS = 180
 MAX_IDENTICAL_TOOL_CALLS = 2
 
-# Локальная структурированная трассировка (SPEC-011).
+# Локальная структурированная трассировка (SPEC-011). Один файл на запуск,
+# data/traces/agent-<run_id>.jsonl (PATCH-011-01).
 TRACE_ENABLED = True
-TRACE_PATH = "data/traces/agent.jsonl"
+TRACE_DIR = "data/traces"
 TRACE_PAYLOAD_PREVIEW_CHARS = 1000
 
 # Слой навыков (SPEC-012) — все пределы host-owned, валидируются на старте.
