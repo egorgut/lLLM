@@ -22,8 +22,8 @@ from config import (
     SKILLS_ROOT,
     SQLITE_DATABASE_PATH,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
+    TRACE_DIR,
     TRACE_ENABLED,
-    TRACE_PATH,
     TRACE_PAYLOAD_PREVIEW_CHARS,
     TRACKER_MCP_SERVER_ID,
 )
@@ -53,7 +53,13 @@ from tools import (
     create_sql_query_handler,
     python_calculate,
 )
-from tracing import JsonlTraceSink, NullTraceSink, SafeTraceSink, build_event
+from tracing import (
+    JsonlTraceSink,
+    NullTraceSink,
+    SafeTraceSink,
+    build_event,
+    trace_file_path,
+)
 
 _DOTENV_PATH = PROJECT_ROOT / ".env"
 
@@ -194,7 +200,11 @@ def main() -> None:
     # One run_id identifies this whole process; a fresh turn_id correlates
     # every trace event and CLI diagnostic for one user turn (SPEC-011 §3).
     run_id = new_id()
-    sink = JsonlTraceSink(TRACE_PATH) if TRACE_ENABLED else NullTraceSink()
+    sink = (
+        JsonlTraceSink(trace_file_path(TRACE_DIR, run_id))
+        if TRACE_ENABLED
+        else NullTraceSink()
+    )
     trace_sink = SafeTraceSink(sink, run_id)
     run_started_at = time.monotonic()
     trace_sink.emit(

@@ -1,5 +1,6 @@
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ from tracing import (
     SafeTraceSink,
     build_event,
     preview_and_hash,
+    trace_file_path,
     utc_now_iso,
 )
 
@@ -66,6 +68,21 @@ class TestNullAndMemorySinks:
         sink.emit(build_event("turn_started", run_id="r1"))
         sink.emit(build_event("turn_finished", run_id="r1"))
         assert [e["event"] for e in sink.events] == ["turn_started", "turn_finished"]
+
+
+class TestTraceFilePath:
+    def test_builds_agent_run_id_jsonl_under_directory(self, tmp_path):
+        path = trace_file_path(tmp_path, "r1")
+        assert path == tmp_path / "agent-r1.jsonl"
+
+    def test_distinct_run_ids_produce_distinct_paths(self, tmp_path):
+        first = trace_file_path(tmp_path, "r1")
+        second = trace_file_path(tmp_path, "r2")
+        assert first != second
+
+    def test_accepts_string_directory(self):
+        path = trace_file_path("data/traces", "r1")
+        assert path == Path("data/traces") / "agent-r1.jsonl"
 
 
 class TestJsonlTraceSink:

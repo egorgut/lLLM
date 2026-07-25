@@ -26,10 +26,12 @@ AGENT_TURN_TIMEOUT_SECONDS = 180
 MAX_IDENTICAL_TOOL_CALLS = 2
 
 # Local structured tracing (SPEC-011). Append-only JSONL, local-only, never
-# uploaded. Generated traces are git-ignored; only this configuration and the
+# uploaded. One file per run — data/traces/agent-<run_id>.jsonl, built by
+# tracing.trace_file_path (PATCH-011-01) — rather than one shared growing
+# file. Generated traces are git-ignored; only this configuration and the
 # tracing code are committed.
 TRACE_ENABLED = True
-TRACE_PATH = "data/traces/agent.jsonl"
+TRACE_DIR = "data/traces"
 TRACE_PAYLOAD_PREVIEW_CHARS = 1000
 
 # External Yandex Tracker MCP server (SPEC-013). Disabled by default; a fresh
