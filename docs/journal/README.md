@@ -44,3 +44,24 @@ Did it meet the acceptance criteria? What we learned.
 ## Follow-ups
 Anything deferred or noticed for a future spec.
 ```
+
+## Patches
+
+`PATCH-NNN-XX` entries use a hybrid rule instead of a file per patch — see
+`patches/README.md` for the full policy:
+
+- **Append** a `## Patches` subsection to the parent SPEC's own journal entry
+  (this file's per-step file) when the patch touches deterministic code only,
+  with no model-facing or model-decision impact.
+- **Create a standalone** `docs/journal/patches/PATCH-NNN-XX-slug.md` (same
+  section headers as above, plus model provenance) when the patch affects
+  observable model or agent behavior. The directory is created on first use.
+- Either way, index the patch under `## Patches` in the parent journal entry
+  so it stays discoverable from the original step, e.g.:
+
+```markdown
+## Patches
+
+- `PATCH-010-01` — repeated tool-call detection.
+  See `docs/journal/patches/PATCH-010-01-repeated-tool-call-detection.md`.
+```
