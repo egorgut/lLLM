@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-016](../../specs/SPEC-016-agent-workspace-and-sandbox-skill.md)
 - **Date:** 2026-08-02
 - **Branch:** feature/SPEC-016-agent-workspace-and-sandbox-skill
-- **Merge commit:** _(filled in at merge)_
+- **Merge commit:** `0f62c5a`
 
 ## Hypothesis / intent
 
