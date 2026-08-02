@@ -130,6 +130,28 @@ class DockerSandboxRuntime:
 
     # -- public API ----------------------------------------------------------
 
+    def ensure_available(self) -> str:
+        """Resolve the image now, raising if the sandbox cannot be used.
+
+        Added for SPEC-016, which has to decide at startup whether to expose a
+        sandbox tool at all. It performs no new Docker work of its own: it runs
+        the same preflight the first job would, so the answer is exactly the one
+        that job would have got, and the resolved image ID is memoised for it.
+
+        Raises `SandboxUnavailable` or `SandboxImageUnavailable`; a caller that
+        wants a boolean catches `SandboxError`.
+        """
+
+        tracer = JobTracer(
+            self._sink,
+            run_id=self._run_id,
+            job_id=new_id(),
+            language="none",
+            policy_fingerprint=self._fingerprint,
+            preview_chars=self._preview_chars,
+        )
+        return self._resolve_image_id(tracer)
+
     def execute(self, job: SandboxJob, *, turn_id: str | None = None) -> SandboxResult:
         """Run one job and return exactly one result.
 

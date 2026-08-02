@@ -17,6 +17,9 @@ from config import (
     MODEL_NAME,
     MODEL_REQUEST_TIMEOUT_SECONDS,
     PROJECT_ROOT,
+    SANDBOX_ARTIFACT_ROOT,
+    SANDBOX_TOOL_ENABLED,
+    SANDBOX_TURN_TIME_MARGIN_SECONDS,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
     SKILL_ROUTING_TIMEOUT_SECONDS,
     SKILLS_ROOT,
@@ -36,6 +39,11 @@ from mcp_integration import (
     load_tracker_server_config,
 )
 from reliability import TurnStatus, new_id
+from sandbox_tool import (
+    SKILL_NAME as SANDBOX_SKILL_NAME,
+    SandboxCapability,
+    build_sandbox_capability,
+)
 from skill_runtime import (
     SkillPackageError,
     SkillPackageLoader,
@@ -191,6 +199,21 @@ class CliRenderer:
         print(chunk, end="", flush=True)
 
 
+def _rollback_artifacts(sandbox: SandboxCapability | None) -> None:
+    """Discard an unsuccessful turn's staged artifacts.
+
+    Never raises: a failed turn is already being reported, and a filesystem
+    problem while cleaning up must not replace that message with a traceback.
+    """
+
+    if sandbox is None:
+        return
+    try:
+        sandbox.workspace.rollback()
+    except Exception:  # noqa: BLE001 - cleanup must not mask the turn's outcome
+        pass
+
+
 def main() -> None:
     # Fill any gaps in the process environment from a local `.env` before
     # anything (e.g. Tracker's config loader) reads it. Real exported
@@ -214,6 +237,24 @@ def main() -> None:
     store = JsonConversationStore(CHAT_HISTORY_PATH)
     conversation = Conversation(messages=store.load())
     registry, executor = build_executor()
+
+    # The sandbox is an optional capability (SPEC-016 §11.2): it needs a running
+    # Docker daemon holding the pinned image, and neither is something a fresh
+    # checkout has. When either is missing the tool is never registered and the
+    # skill is omitted, so the model is never offered a capability that could
+    # only fail — normal chat and every other tool are unaffected. The
+    # diagnostic is printed later, beside the MCP and skill lines.
+    sandbox, sandbox_diagnostic = build_sandbox_capability(
+        run_id=run_id,
+        artifact_root=SANDBOX_ARTIFACT_ROOT,
+        project_root=PROJECT_ROOT,
+        turn_time_margin_seconds=SANDBOX_TURN_TIME_MARGIN_SECONDS,
+        enabled=SANDBOX_TOOL_ENABLED,
+        trace_sink=trace_sink,
+    )
+    if sandbox is not None:
+        registry.register(sandbox.spec)
+        executor.register_handler(sandbox.spec.name, sandbox.handler)
 
     # MCP tool discovery is fail-fast and happens before the chat loop. If a
     # server cannot be launched, initialized, or queried, report it clearly (no
@@ -263,6 +304,10 @@ def main() -> None:
         omit_skills = (
             frozenset() if mcp_servers[TRACKER_MCP_SERVER_ID].enabled else frozenset({"tracker_read"})
         )
+        # code_workspace's only tool is sandbox_execute, so an unavailable or
+        # disabled sandbox omits the package by the same rule (SPEC-016 §19.4).
+        if sandbox is None:
+            omit_skills = omit_skills | frozenset({SANDBOX_SKILL_NAME})
         try:
             skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, registry, omit=omit_skills)
         except SkillPackageError as error:
@@ -300,10 +345,23 @@ def main() -> None:
             trace_sink=trace_sink,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
             on_selection=announce_skill,
+            # Binds each sandbox turn to the turn_id and deadline the
+            # orchestrator mints, before routing spends any of it.
+            on_turn_context=(
+                sandbox.workspace.begin_turn if sandbox else lambda _context: None
+            ),
+            # A sandbox call's arguments are the user's data as code and files,
+            # not parameters worth previewing into a local trace (SPEC-016 §15.3).
+            redacted_argument_tools=(
+                frozenset({sandbox.spec.name}) if sandbox else frozenset()
+            ),
         )
 
         for summary in manager.server_summaries():
             print(f"[mcp] {summary}")
+        print(sandbox_diagnostic)
+        if sandbox is None:
+            print(f"[skills] {SANDBOX_SKILL_NAME}: omitted")
         if len(skill_registry):
             names = ", ".join(entry.name for entry in skill_registry.catalog())
             print(f"[skills] {len(skill_registry)} loaded: {names}")
@@ -350,23 +408,30 @@ def main() -> None:
                     "\nApplication error: Unexpected application error.\n"
                     f"Run ID: {run_id}\n"
                 )
+                _rollback_artifacts(sandbox)
                 conversation.remove_last_message()
                 continue
 
             outcome = result.outcome
             # Only a completed turn persists; every other outcome (including any
-            # routing failure) rolls back the tentative user message.
+            # routing failure) rolls back the tentative user message. Sandbox
+            # artifacts follow exactly the same rule (SPEC-016 §9.5): a turn the
+            # user never got an answer from leaves no files behind either.
             if outcome.status is TurnStatus.COMPLETED:
+                if sandbox is not None:
+                    sandbox.workspace.commit()
                 conversation.add_assistant_message(outcome.final_text)
                 store.save(conversation.stored_messages)
             elif outcome.status is TurnStatus.CANCELLED:
                 print(f"\n{outcome.error_message}\nRun ID: {outcome.turn_id}\n")
+                _rollback_artifacts(sandbox)
                 conversation.remove_last_message()
             else:
                 print(
                     f"\nApplication error: {outcome.error_message}\n"
                     f"Run ID: {outcome.turn_id}\n"
                 )
+                _rollback_artifacts(sandbox)
                 conversation.remove_last_message()
 
             print("\n")

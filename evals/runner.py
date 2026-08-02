@@ -256,6 +256,7 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
     tool_registry = make_tool_registry(
         "sql_query",
         "python_calculate",
+        "sandbox_execute",
         "mcp_time__get_current_time",
         "mcp_tracker__issue_get",
         "mcp_tracker__issues_find",

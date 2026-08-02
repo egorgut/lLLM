@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodeWorkspaceInput",
+  "type": "object",
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "What the script must accomplish, in one sentence."
+    },
+    "output_files": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Files the user expects, e.g. ['summary.csv']. Empty when the user only wants an answer."
+    },
+    "input_data": {
+      "type": ["string", "null"],
+      "description": "Data supplied in the conversation that the script must process, if any."
+    }
+  },
+  "required": ["task"],
+  "additionalProperties": false
+}

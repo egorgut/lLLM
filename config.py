@@ -105,10 +105,9 @@ MAX_SKILL_SCHEMA_BYTES = 100_000
 MAX_SKILLS = 100
 MAX_SKILL_DESCRIPTION_CHARS = 200
 
-# Isolated sandbox runtime (SPEC-015). Host-only infrastructure: nothing here is
-# wired into application startup, no SANDBOX_ENABLED flag exists, and the model
-# has no sandbox capability yet — SPEC-016 adds the tool boundary. The runtime is
-# instantiated explicitly by tests and by scripts/sandbox_smoke.py.
+# Isolated sandbox runtime (SPEC-015). The runtime itself owns every execution
+# rule below; SPEC-016 added the model-facing boundary on top of it (see the
+# SANDBOX_TOOL_* block after this one) without changing a single limit here.
 #
 # Every value below is host-owned. A SandboxJob carries only the language, the
 # source, and optional input files; it has no field that could raise a limit,
@@ -160,6 +159,28 @@ SANDBOX_MAX_ARTIFACT_PATH_CHARS = 240
 # collected output copy. Every job directory is deleted in a finally block; the
 # whole tree is git-ignored and never holds secrets.
 SANDBOX_TEMP_ROOT = PROJECT_ROOT / "data" / "sandbox" / "tmp"
+
+# Model-facing sandbox boundary (SPEC-016). Deliberately three values: the tool
+# layer adds an artifact destination and a time margin, and reuses every SPEC-015
+# limit above rather than maintaining a second set that could drift wider.
+#
+# There is no workspace root here on purpose. SPEC-015 already creates, mounts,
+# and deletes data/sandbox/tmp/<job_id>/ for each job, and source, inputs, and
+# artifacts all travel through the tool layer in memory — a second temporary
+# tree would only add a second cleanup path with nothing to clean.
+SANDBOX_TOOL_ENABLED = True
+
+# Where a successful turn's artifacts are published for the user. Unlike the
+# per-job scratch space, these survive the turn (that is the point: the user has
+# to be able to open the file the agent made) but are still isolated per
+# run and per turn, and a failed turn's directory is removed.
+SANDBOX_ARTIFACT_ROOT = PROJECT_ROOT / "data" / "artifacts"
+
+# Host margin on the whole-turn deadline check performed before a container is
+# started. A job may only begin when the remaining turn time still covers
+# execution + cleanup + this margin, so the outer caller-side deadline can never
+# abandon a live container before SPEC-015 has killed and removed it.
+SANDBOX_TURN_TIME_MARGIN_SECONDS = 2
 
 # Local MCP servers launched by the host over stdio (SPEC-009). Each entry is a
 # child process the harness starts; the command, arguments, and environment are

@@ -136,6 +136,14 @@ class TestCasesFile:
             "tracker_large_result",
             "tracker_prompt_injection_content",
             "tracker_live_smoke",
+            "sandbox_python_artifact",
+            "sandbox_bash_transform",
+            "sandbox_error_recovery",
+            "sandbox_network_refusal",
+            "sandbox_package_refusal",
+            "sandbox_host_path_refusal",
+            "sandbox_not_selected",
+            "sandbox_budget_guard",
         }
 
 

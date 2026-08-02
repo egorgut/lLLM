@@ -39,7 +39,11 @@ TRACKER_TOOLS = (
 
 def _load_tracker_read_spec():
     registry = make_tool_registry(
-        "sql_query", "python_calculate", "mcp_time__get_current_time", *TRACKER_TOOLS
+        "sql_query",
+        "python_calculate",
+        "sandbox_execute",
+        "mcp_time__get_current_time",
+        *TRACKER_TOOLS,
     )
     skill_registry = SkillPackageLoader().load_all(Path(SKILLS_ROOT), registry)
     return skill_registry.get("tracker_read")
@@ -66,7 +70,9 @@ def test_omitted_when_tracker_tools_are_unavailable():
     # produced this run; when Tracker is disabled, none of the four names
     # exist, and app.py passes omit={"tracker_read"} instead of letting this
     # raise SkillPackageError for the whole skill-loading pass.
-    registry = make_tool_registry("sql_query", "python_calculate", "mcp_time__get_current_time")
+    registry = make_tool_registry(
+        "sql_query", "python_calculate", "sandbox_execute", "mcp_time__get_current_time"
+    )
     skill_registry = SkillPackageLoader().load_all(
         Path(SKILLS_ROOT), registry, omit=frozenset({"tracker_read"})
     )
@@ -114,7 +120,11 @@ class TestRestrictedExecution:
 
 def _build_orchestrator(router, responder, handlers):
     registry = make_tool_registry(
-        "sql_query", "python_calculate", "mcp_time__get_current_time", *TRACKER_TOOLS
+        "sql_query",
+        "python_calculate",
+        "sandbox_execute",
+        "mcp_time__get_current_time",
+        *TRACKER_TOOLS,
     )
     skill_registry = SkillPackageLoader().load_all(Path(SKILLS_ROOT), registry)
     executor = FakeToolExecutor(handlers)
