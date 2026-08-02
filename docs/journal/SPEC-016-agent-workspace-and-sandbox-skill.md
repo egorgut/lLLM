@@ -274,6 +274,13 @@ error (cross-turn access) rather than on a syntax mistake — spending two of fo
 calls before explaining. The skill's retry guidance could be sharper about
 recognising cross-turn access as non-correctable *before* the first call.
 
+## Patches
+
+- `PATCH-016-01` — cross-turn artifact guidance in `code_workspace`, addressing
+  the wasted retry observed in the live run above. Partially successful: the
+  recovery strategy changed in every run, the call count did not.
+  See `docs/journal/patches/PATCH-016-01-cross-turn-artifact-guidance.md`.
+
 ## Follow-ups
 
 - **`stdout_preview` in SPEC-015's trace** (finding 2 above) — a PATCH against

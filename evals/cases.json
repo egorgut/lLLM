@@ -1757,5 +1757,36 @@
       "reason": "tool_call_limit",
       "max_tool_calls": 4
     }
+  },
+  {
+    "id": "sandbox-cross-turn-refusal-001",
+    "category": "sandbox_cross_turn_refusal",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Use the code_workspace skill to read back the CSV you made a moment ago and sum the squares column.",
+    "route": [],
+    "script": [
+      {
+        "text": "A new turn cannot open a file from an earlier turn - each sandbox run starts empty, and only files supplied in the same call are visible. The numbers are reproducible, so: 1+4+9+16+25 = 55. If you want it computed from a file, paste the CSV back and I will process it."
+      }
+    ],
+    "tool_results": {},
+    "expectation": {
+      "expected_selection": "code_workspace",
+      "selection_source": "explicit",
+      "status": "completed",
+      "reason": "final_answer",
+      "max_tool_calls": 0,
+      "forbidden_tools": [
+        "sql_query",
+        "python_calculate"
+      ],
+      "answer_contains": [
+        "earlier turn",
+        "55"
+      ]
+    }
   }
 ]

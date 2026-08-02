@@ -73,6 +73,36 @@ class TestPackage:
         for limitation in ("no network", "no package installation", "host filesystem"):
             assert limitation in instruction
 
+    def test_documents_that_each_run_starts_empty(self):
+        """PATCH-016-01: the rule must be stated where the tool is described.
+
+        SPEC-016's live run showed the model discovering this by running into
+        it twice, so "inputs come only from this call" has to be a stated fact
+        rather than something a FileNotFoundError teaches.
+        """
+
+        instruction = _load_spec().instruction.lower()
+        assert "each run starts empty" in instruction
+        assert "input_files" in instruction
+        assert "earlier turn" in instruction
+
+    def test_names_cross_turn_access_as_non_correctable(self):
+        """PATCH-016-01: it must appear in the retry rule, not only as a 'never'.
+
+        The retry decision is where the wasted call was spent, so the guidance
+        has to be readable at that moment.
+        """
+
+        instruction = _load_spec().instruction.lower()
+        retry_rule = instruction.split("do not retry a failure no script can fix")
+        assert len(retry_rule) == 2, "the non-correctable rule is missing"
+        assert "earlier turn" in retry_rule[1].split("\n\n")[0]
+
+    def test_offers_an_alternative_to_the_user(self):
+        instruction = _load_spec().instruction.lower()
+        assert "recreate" in instruction
+        assert "supply it" in instruction or "supply the" in instruction
+
     def test_omitted_when_the_sandbox_is_unavailable(self):
         """Mirrors app.py: no sandbox tool registered means no skill loaded."""
 
