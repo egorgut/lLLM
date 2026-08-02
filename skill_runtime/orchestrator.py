@@ -69,6 +69,8 @@ class SkillTurnOrchestrator:
         id_factory: Callable[[], str] = new_id,
         payload_preview_chars: int = 1000,
         on_selection: Callable[[SkillSelection], None] = lambda _selection: None,
+        on_turn_context: Callable[[TurnContext], None] = lambda _context: None,
+        redacted_argument_tools: frozenset[str] = frozenset(),
     ) -> None:
         self._skill_registry = skill_registry
         self._router = router
@@ -88,12 +90,20 @@ class SkillTurnOrchestrator:
         self._id_factory = id_factory
         self._payload_preview_chars = payload_preview_chars
         self._on_selection = on_selection
+        self._on_turn_context = on_turn_context
+        self._redacted_argument_tools = redacted_argument_tools
 
     def run_turn(self, conversation: Conversation) -> SkillTurnResult:
         turn_id = self._id_factory()
         started = self._clock()
         deadline = started + self._agent_turn_timeout_seconds
         context = TurnContext(self._run_id, turn_id, started, deadline)
+        # Announce the turn's identity and deadline before routing, so a
+        # host-owned per-turn resource (SPEC-016's sandbox workspace) is bound to
+        # the same turn and the same budget as everything that follows. The
+        # orchestrator itself neither creates nor cleans up such a resource: the
+        # caller that opens the turn also closes it, keyed off the outcome.
+        self._on_turn_context(context)
 
         catalog = self._skill_registry.catalog()
         try:
@@ -206,6 +216,7 @@ class SkillTurnOrchestrator:
             clock=self._clock,
             id_factory=self._id_factory,
             payload_preview_chars=self._payload_preview_chars,
+            redacted_argument_tools=self._redacted_argument_tools,
         )
 
     def _routing_failure(

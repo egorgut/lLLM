@@ -136,6 +136,7 @@ class AgentRunner:
         clock: Callable[[], float] = time.monotonic,
         id_factory: Callable[[], str] = new_id,
         payload_preview_chars: int = 1000,
+        redacted_argument_tools: frozenset[str] = frozenset(),
     ) -> None:
         # All numeric limits are host-owned; reject an incoherent configuration
         # at construction time rather than mid-turn (SPEC-011 §10).
@@ -161,6 +162,13 @@ class AgentRunner:
         self._clock = clock
         self._id_factory = id_factory
         self._payload_preview_chars = payload_preview_chars
+        # Tools whose arguments are content rather than parameters, and must
+        # therefore never be previewed or hashed into the trace (SPEC-016 §15.3).
+        # A `sql_query` string is a parameter worth seeing in a trace; a
+        # `sandbox_execute` source is the user's data expressed as code, and its
+        # input files are the user's files. Host-owned and name-based, so this
+        # stays one generic rule rather than sandbox-specific loop logic.
+        self._redacted_argument_tools = redacted_argument_tools
         # Per-turn skill context (SPEC-012); (re)assigned at the top of run_turn.
         self._selected_skill: str | None = None
         self._skill_version: str | None = None
@@ -403,9 +411,16 @@ class AgentRunner:
                 consecutive_identical_count + 1 if fingerprint == last_fingerprint else 1
             )
 
-            preview, digest, truncated = preview_and_hash(
-                call.arguments, limit=self._payload_preview_chars
-            )
+            redacted = call.name in self._redacted_argument_tools
+            if redacted:
+                # Size and identity still make the call traceable; the content
+                # does not appear, and neither does a hash of it — a hash of a
+                # short script is not much of a secret.
+                preview, digest, truncated = "", None, False
+            else:
+                preview, digest, truncated = preview_and_hash(
+                    call.arguments, limit=self._payload_preview_chars
+                )
             self._trace.emit(
                 build_event(
                     "tool_call_requested",
@@ -417,6 +432,7 @@ class AgentRunner:
                     arguments_preview=preview,
                     arguments_sha256=digest,
                     arguments_truncated=truncated,
+                    arguments_redacted=redacted,
                     consecutive_identical_count=next_count,
                 )
             )

@@ -41,6 +41,13 @@ data/evals/
 # different, tracked directories and are unaffected.
 data/sandbox/
 
+# Per-turn sandbox artifacts (SPEC-016): files a successful turn produced for
+# the user. They deliberately outlive their turn so the user can open them, but
+# they are generated output belonging to one local run — never part of the
+# experiment's source. A failed turn's directory is removed at the turn
+# boundary; these are the ones that survived.
+data/artifacts/
+
 # OS / editor
 .DS_Store
 .idea/
