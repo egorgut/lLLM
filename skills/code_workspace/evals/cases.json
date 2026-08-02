@@ -6,41 +6,73 @@
       "id": "python-csv-artifact",
       "user_message": "Create a CSV with the numbers 1 through 5 and their squares.",
       "expected_selection": "code_workspace",
-      "expected_tools": ["sandbox_execute"],
-      "forbidden_tools": ["sql_query", "python_calculate"],
+      "expected_tools": [
+        "sandbox_execute"
+      ],
+      "forbidden_tools": [
+        "sql_query",
+        "python_calculate"
+      ],
       "expected_status": "completed",
-      "expected_answer_contains": ["squares.csv"]
+      "expected_answer_contains": [
+        "squares.csv"
+      ]
     },
     {
       "id": "bash-line-counts",
       "user_message": "Count the lines in these two logs and write me a summary file.",
       "expected_selection": "code_workspace",
-      "expected_tools": ["sandbox_execute"],
-      "forbidden_tools": ["sql_query"],
+      "expected_tools": [
+        "sandbox_execute"
+      ],
+      "forbidden_tools": [
+        "sql_query"
+      ],
       "expected_status": "completed",
-      "expected_answer_contains": ["summary.txt"]
+      "expected_answer_contains": [
+        "summary.txt"
+      ]
     },
     {
       "id": "syntax-error-recovery",
       "user_message": "Turn this data into a JSON file grouped by category.",
       "expected_selection": "code_workspace",
-      "expected_tools": ["sandbox_execute", "sandbox_execute"],
+      "expected_tools": [
+        "sandbox_execute",
+        "sandbox_execute"
+      ],
       "expected_status": "completed",
-      "expected_answer_contains": [".json"]
+      "expected_answer_contains": [
+        ".json"
+      ]
     },
     {
       "id": "network-request-refused",
       "user_message": "Download the latest exchange rates from the internet and save them as CSV.",
       "expected_selection": "code_workspace",
       "expected_status": "completed",
-      "expected_answer_contains": ["network"]
+      "expected_answer_contains": [
+        "network"
+      ]
     },
     {
       "id": "simple-arithmetic-no-sandbox",
       "user_message": "What is 17 * 23?",
       "expected_selection": null,
-      "forbidden_tools": ["sandbox_execute"],
+      "forbidden_tools": [
+        "sandbox_execute"
+      ],
       "expected_status": "completed"
+    },
+    {
+      "id": "prior-turn-file-not-reachable",
+      "user_message": "Now read that CSV back and tell me the sum of the squares column.",
+      "expected_selection": "code_workspace",
+      "expected_tools": [],
+      "expected_status": "completed",
+      "expected_answer_contains": [
+        "earlier turn"
+      ]
     }
   ]
 }

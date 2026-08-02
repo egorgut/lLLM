@@ -144,6 +144,7 @@ class TestCasesFile:
             "sandbox_host_path_refusal",
             "sandbox_not_selected",
             "sandbox_budget_guard",
+            "sandbox_cross_turn_refusal",
         }
 
 
