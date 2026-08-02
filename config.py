@@ -43,7 +43,21 @@ TRACE_PAYLOAD_PREVIEW_CHARS = 1000
 TRACKER_MCP_SERVER_ID = "tracker"
 TRACKER_MCP_COMMAND = "uvx"
 TRACKER_MCP_PACKAGE = "yandex-tracker-mcp==0.7.2"
-TRACKER_MCP_ARGS = ["--from", TRACKER_MCP_PACKAGE, "yandex-tracker-mcp"]
+# The MCP SDK inside the uvx child environment is bounded to the same range as
+# this project's own requirements.txt (PATCH-013-01). Pinning the server package
+# alone was not enough: 0.7.2 declares `mcp[cli]>=1.21` with no upper bound, and
+# `uvx` resolves the child independently, so the SDK's 2.0 release — which
+# removed the `mcp.server.fastmcp` module the server imports — silently entered
+# the environment and crashed the child at startup. An external integration is
+# only reproducible if its transitive dependencies are bounded too.
+TRACKER_MCP_SDK_REQUIREMENT = "mcp>=1.27,<2"
+TRACKER_MCP_ARGS = [
+    "--from",
+    TRACKER_MCP_PACKAGE,
+    "--with",
+    TRACKER_MCP_SDK_REQUIREMENT,
+    "yandex-tracker-mcp",
+]
 TRACKER_MCP_REQUIRED_TOOLS = frozenset(
     {
         "issue_get",
