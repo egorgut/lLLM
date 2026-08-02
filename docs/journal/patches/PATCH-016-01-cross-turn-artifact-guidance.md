@@ -4,7 +4,7 @@
 - **Parent spec:** [SPEC-016](../../../specs/SPEC-016-agent-workspace-and-sandbox-skill.md)
 - **Date:** 2026-08-02
 - **Branch:** patch/PATCH-016-01-cross-turn-artifact-guidance
-- **Merge commit:** _(filled in at merge)_
+- **Merge commit:** `f1cb845`
 
 ## Hypothesis / intent
 
