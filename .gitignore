@@ -33,6 +33,14 @@ data/.chinook.sqlite.*.tmp
 data/traces/
 data/evals/
 
+# Per-job sandbox scratch space (SPEC-015): read-only source/input mounts and
+# the collected output copy. Every job directory is deleted after its result is
+# built, so nothing here should survive a run — no generated artifact, source
+# copy, input copy, or container id belongs in git. The committed sandbox image
+# definition (`sandbox/`) and the runtime package (`sandbox_runtime/`) are
+# different, tracked directories and are unaffected.
+data/sandbox/
+
 # OS / editor
 .DS_Store
 .idea/
