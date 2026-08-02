@@ -91,6 +91,62 @@ MAX_SKILL_SCHEMA_BYTES = 100_000
 MAX_SKILLS = 100
 MAX_SKILL_DESCRIPTION_CHARS = 200
 
+# Isolated sandbox runtime (SPEC-015). Host-only infrastructure: nothing here is
+# wired into application startup, no SANDBOX_ENABLED flag exists, and the model
+# has no sandbox capability yet — SPEC-016 adds the tool boundary. The runtime is
+# instantiated explicitly by tests and by scripts/sandbox_smoke.py.
+#
+# Every value below is host-owned. A SandboxJob carries only the language, the
+# source, and optional input files; it has no field that could raise a limit,
+# change the image, add an environment variable, or alter a mount. The
+# configured tag is resolved to an immutable image ID before any container is
+# created, so a retagged image cannot silently change what runs.
+SANDBOX_IMAGE_REF = "lllm-sandbox:spec-015"
+
+# Wall-clock bounds. execution + cleanup must stay strictly below
+# TOOL_EXECUTION_TIMEOUT_SECONDS above (10 + 5 < 30), so that when SPEC-016
+# calls this runtime from one ordinary tool execution, the sandbox can kill and
+# remove its own container before the outer caller-side deadline fires.
+SANDBOX_EXECUTION_TIMEOUT_SECONDS = 10
+SANDBOX_DOCKER_CONTROL_TIMEOUT_SECONDS = 10
+SANDBOX_CLEANUP_TIMEOUT_SECONDS = 5
+
+# Container resource ceilings, enforced by Docker rather than by Python: unlike
+# reliability.run_with_deadline, exceeding these terminates the whole container
+# and every process in it.
+SANDBOX_MEMORY_BYTES = 256 * 1024 * 1024
+SANDBOX_CPUS = 1.0
+SANDBOX_PIDS_LIMIT = 64
+SANDBOX_NOFILE_LIMIT = 64
+
+# The only writable locations in the container. The root filesystem is mounted
+# read-only and there is no writable host bind mount, so a job cannot consume
+# host disk: generated files live in this bounded tmpfs and vanish with the
+# container.
+SANDBOX_TMP_BYTES = 16 * 1024 * 1024
+SANDBOX_OUTPUT_TMPFS_BYTES = 8 * 1024 * 1024
+
+# Bounds on what the host puts into a container.
+SANDBOX_MAX_SOURCE_BYTES = 100_000
+SANDBOX_MAX_INPUT_FILES = 20
+SANDBOX_MAX_INPUT_FILE_BYTES = 1_000_000
+SANDBOX_MAX_INPUT_TOTAL_BYTES = 2_000_000
+
+# Bounds on what crosses back out. Output is streamed and counted incrementally;
+# crossing either limit kills the container rather than buffering more.
+SANDBOX_MAX_STDOUT_BYTES = 100_000
+SANDBOX_MAX_STDERR_BYTES = 100_000
+
+SANDBOX_MAX_ARTIFACT_FILES = 20
+SANDBOX_MAX_ARTIFACT_FILE_BYTES = 2_000_000
+SANDBOX_MAX_ARTIFACT_TOTAL_BYTES = 5_000_000
+SANDBOX_MAX_ARTIFACT_PATH_CHARS = 240
+
+# Private per-job scratch space for read-only source/input mounts and the
+# collected output copy. Every job directory is deleted in a finally block; the
+# whole tree is git-ignored and never holds secrets.
+SANDBOX_TEMP_ROOT = PROJECT_ROOT / "data" / "sandbox" / "tmp"
+
 # Local MCP servers launched by the host over stdio (SPEC-009). Each entry is a
 # child process the harness starts; the command, arguments, and environment are
 # controlled here by the developer and can never be supplied by the model or by
