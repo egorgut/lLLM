@@ -184,11 +184,20 @@ mcp_tracker__issue_get_comments     — прочитать комментари�
 - ровно один идентификатор организации: `TRACKER_ORG_ID` (Yandex 360) или
   `TRACKER_CLOUD_ORG_ID` (Yandex Cloud) — не оба сразу.
 
-Пакет закреплён на точную протестированную версию:
+Пакет закреплён на точную протестированную версию, а SDK внутри дочернего
+uvx-окружения — на тот же диапазон, что и у самого проекта (PATCH-013-01):
 
 ```text
 yandex-tracker-mcp==0.7.2
+mcp>=1.27,<2
 ```
+
+Одного пина пакета оказалось мало: сам `yandex-tracker-mcp==0.7.2` объявляет
+`mcp[cli]>=1.21` без верхней границы, а `uvx` разрешает зависимости дочернего
+окружения независимо от проекта. Когда вышел мажорный релиз MCP SDK 2.0, он
+попал в дочернее окружение и уронил сервер на старте (`ImportError: cannot
+import name 'FastMCP' from 'mcp.server'`). Внешняя интеграция воспроизводима
+только тогда, когда ограничены и транзитивные зависимости.
 
 Переменные окружения (интеграция выключена по умолчанию — свежий чекаут не
 требует токена). Через shell:
@@ -598,6 +607,8 @@ MAX_SKILL_DESCRIPTION_CHARS = 200
 TRACKER_MCP_SERVER_ID = "tracker"
 TRACKER_MCP_COMMAND = "uvx"
 TRACKER_MCP_PACKAGE = "yandex-tracker-mcp==0.7.2"   # закреплённая версия, без @latest
+TRACKER_MCP_SDK_REQUIREMENT = "mcp>=1.27,<2"        # граница SDK в дочернем uvx-окружении
+TRACKER_MCP_ARGS = ["--from", TRACKER_MCP_PACKAGE, "--with", TRACKER_MCP_SDK_REQUIREMENT, ...]
 TRACKER_MCP_REQUIRED_TOOLS = frozenset({
     "issue_get", "issues_find", "queue_get_metadata", "issue_get_comments",
 })

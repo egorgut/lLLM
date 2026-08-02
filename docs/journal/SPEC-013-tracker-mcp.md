@@ -311,3 +311,86 @@ and tracing behavior all remain green and unchanged.
   needs a hard per-argument cap, it would need its own narrowly-scoped
   design discussion, since the current architecture deliberately avoids any
   Tracker-specific dispatch logic.
+
+## Patches
+
+### `PATCH-013-01` — Pin Tracker MCP SDK Version
+
+- **Patch:** [`patches/SPEC-013/PATCH-013-01-Pin-Tracker-MCP-SDK-Version.md`](../../patches/SPEC-013/PATCH-013-01-Pin-Tracker-MCP-SDK-Version.md)
+- **Date:** 2026-08-02
+- **Branch:** patch/PATCH-013-01-pin-tracker-mcp-sdk
+
+**Problem.** Startup began aborting with `ImportError: cannot import name
+'FastMCP' from 'mcp.server'` whenever Tracker was enabled, with no change on
+our side. SPEC-013's pin on the server package was intact; the hole was one
+level down. `yandex-tracker-mcp==0.7.2` declares `mcp[cli]>=1.21` with **no
+upper bound**, and `uvx` resolves the child environment independently of this
+project, so the MCP SDK's `2.0.0` release — which removed the
+`mcp.server.fastmcp` module the server imports — entered the child and killed
+it before the session initialized. The host was on `mcp>=1.27,<2` the whole
+time; host and child had drifted onto different SDK generations.
+
+This was discovered incidentally while verifying SPEC-015 and confirmed
+pre-existing by reproducing it on a clean `main`.
+
+**Change.** One constraint added to the `uvx` argument vector in `config.py`,
+bounding the child's SDK to the range the host already uses:
+
+```python
+TRACKER_MCP_SDK_REQUIREMENT = "mcp>=1.27,<2"
+TRACKER_MCP_ARGS = ["--from", TRACKER_MCP_PACKAGE,
+                    "--with", TRACKER_MCP_SDK_REQUIREMENT, "yandex-tracker-mcp"]
+```
+
+`TRACKER_MCP_PACKAGE` stays at `0.7.2`. Upstream's `0.7.3` fixes the same
+metadata (`mcp[cli]<2,>=1.21`) and was verified to work with an identical
+39-tool surface, but was deliberately rejected: it leaves the guarantee resting
+on third-party metadata staying correct, and pulls in upstream changes
+unrelated to this defect. Bounding the transitive dependency ourselves fixes
+the actual hole for any package version.
+
+**Verification.** Two new regression tests in `tests/test_mcp_config.py` assert
+the committed vector carries an upper-bounded MCP constraint and that it stays
+in step with `requirements.txt`, so a future edit cannot silently drop either.
+Full suite: 394 passed, 20 skipped.
+
+Live startup, restored:
+
+```text
+[mcp] connected: time (1 tool)
+[mcp] connected: tracker (4 admitted, 35 filtered)
+[skills] 2 loaded: sales_analysis, tracker_read
+```
+
+Live-model verification was required, since the defect made four model-facing
+tools and one skill unavailable. With `qwen3:8b` (digest `500a1f067a9f`,
+Q4_K_M, defaults — no options set in `llm.py`):
+
+```text
+You: Use the tracker_read skill and search the CANBAN queue for issues, then tell me what you found.
+[skill] tracker_read
+
+[tool 1/4] mcp_tracker__issues_find
+[args] {"query": "Queue: CANBAN", "per_page": 5}
+[result] {"ok": true, "server": "tracker", "tool": "issues_find", "data": {"result": []}}
+
+Qwen: No issues were found in the CANBAN queue with the current search parameters. ...
+```
+
+That closes the long-standing follow-up above: this is the first **live read
+operation** through the allowlist, not just a startup/admission check. The
+`ok: true` envelope is a genuine Tracker API response — the organisation's
+queues really are empty, confirmed independently against
+`queues_get_all`/`issues_find` outside the allowlist.
+
+**Observed, not fixed here.** Two real-data behaviours surfaced during
+verification and belong to their own future steps, not to this patch:
+
+- The model composes `issues_find` queries by guessing Yandex query syntax
+  (e.g. embedding `per_page:` inside the query string), which the API rejects
+  with HTTP 422. The harness handles it correctly — a structured error envelope
+  the model can self-correct from — but the `tracker_read` instruction could
+  teach the query language more explicitly.
+- `queue_get_metadata` on some queues returns HTTP 403 for this token, so the
+  token's read scope is narrower than the allowlist. Again surfaced cleanly as
+  a bounded error envelope.

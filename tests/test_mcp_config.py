@@ -10,6 +10,7 @@ environment directly via `monkeypatch`.
 import pytest
 
 import config
+from config import PROJECT_ROOT
 from mcp_integration.client import McpStartupError
 from mcp_integration.config import McpServerConfig, env_bool, load_tracker_server_config
 
@@ -137,6 +138,26 @@ class TestLoadTrackerServerConfigEnabled:
         # input -- belt-and-suspenders alongside the runtime check above.
         assert "@latest" not in config.TRACKER_MCP_PACKAGE
         assert "==" in config.TRACKER_MCP_PACKAGE
+
+    def test_committed_args_bound_the_child_mcp_sdk(self):
+        # Pinning the server package alone left its own `mcp[cli]>=1.21`
+        # dependency unbounded, so the SDK's 2.0 release entered the uvx child
+        # environment and crashed it at startup (PATCH-013-01). The upper bound
+        # must survive any future edit of this vector.
+        args = config.TRACKER_MCP_ARGS
+        assert "--with" in args
+        requirement = args[args.index("--with") + 1]
+        assert requirement.startswith("mcp")
+        assert "<2" in requirement, "the child MCP SDK needs an upper bound"
+
+    def test_child_and_host_run_the_same_mcp_sdk_generation(self):
+        # A child on an SDK major version the host deliberately excludes is the
+        # exact condition that broke startup; keep the two ranges in step.
+        requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        host_pin = next(
+            line.strip() for line in requirements.splitlines() if line.startswith("mcp")
+        )
+        assert host_pin == config.TRACKER_MCP_SDK_REQUIREMENT
 
     def test_enabled_success_builds_expected_env(self, monkeypatch):
         _clear_tracker_env(monkeypatch)
