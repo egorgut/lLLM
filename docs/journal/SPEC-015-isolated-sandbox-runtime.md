@@ -3,7 +3,7 @@
 - **Spec:** [SPEC-015](../../specs/SPEC-015-Isolated-Sandbox-Runtime.md)
 - **Date:** 2026-08-02
 - **Branch:** feature/SPEC-015-isolated-sandbox-runtime
-- **Merge commit:** _(filled on merge)_
+- **Merge commit:** 2221565
 
 ## Hypothesis / intent
 
