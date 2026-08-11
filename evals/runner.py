@@ -32,16 +32,15 @@ from typing import Any
 
 from agent import AgentRunner
 from config import (
-    AGENT_TURN_TIMEOUT_SECONDS,
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_ROUTING_RESPONSE_CHARS,
     MAX_TOOL_CALLS_PER_TURN,
-    MODEL_NAME,
-    MODEL_REQUEST_TIMEOUT_SECONDS,
+    MODEL_PROFILES,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
-    SKILL_ROUTING_TIMEOUT_SECONDS,
     SKILLS_ROOT,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
+    ModelProfile,
+    resolve_model_profile,
 )
 from conversation import Conversation
 from reliability import TurnStatus, new_id
@@ -58,6 +57,11 @@ from tests.support import (
 from tracing import NullTraceSink
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# The scripted suite never contacts a model, so it is pinned to one profile's
+# deadlines regardless of --profile (SPEC-017 §4.3): its committed results must
+# stay comparable across runs, and its scripted doubles have no latency at all.
+SCRIPTED_PROFILE = MODEL_PROFILES["fast"]
 DEFAULT_CASES_PATH = PROJECT_ROOT / "evals" / "cases.json"
 RESULTS_DIR = PROJECT_ROOT / "data" / "evals"
 SCHEMA_VERSION = 1
@@ -210,9 +214,9 @@ def run_scripted_case(case: dict[str, Any]) -> CaseResult:
     runner_config = dict(
         max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
         max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-        model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+        model_request_timeout_seconds=SCRIPTED_PROFILE.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-        agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+        agent_turn_timeout_seconds=SCRIPTED_PROFILE.agent_turn_timeout_seconds,
     )
     runner_config.update(case.get("runner_overrides", {}))
 
@@ -272,7 +276,7 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
     )
     router = SkillRouter(
         ScriptedRouteFn(list(case.get("route", []))),
-        timeout_seconds=SKILL_ROUTING_TIMEOUT_SECONDS,
+        timeout_seconds=SCRIPTED_PROFILE.skill_routing_timeout_seconds,
         max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
         repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
     )
@@ -290,9 +294,9 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
         run_id="eval-scripted",
         max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
         max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-        model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+        model_request_timeout_seconds=SCRIPTED_PROFILE.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-        agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+        agent_turn_timeout_seconds=SCRIPTED_PROFILE.agent_turn_timeout_seconds,
         trace_sink=NullTraceSink(),
     )
 
@@ -355,7 +359,9 @@ def _render_live_prompt(template: str) -> str:
     return template.format(**values)
 
 
-def run_live_case(case: dict[str, Any], executor, tools, respond, run_id: str) -> CaseResult:
+def run_live_case(
+    case: dict[str, Any], executor, tools, respond, run_id: str, profile: ModelProfile
+) -> CaseResult:
     from prompts import SYSTEM_PROMPT
 
     runner = AgentRunner(
@@ -366,9 +372,9 @@ def run_live_case(case: dict[str, Any], executor, tools, respond, run_id: str) -
         run_id=run_id,
         max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
         max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-        model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+        model_request_timeout_seconds=profile.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-        agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+        agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
         trace_sink=NullTraceSink(),
     )
     messages = [
@@ -403,13 +409,13 @@ def run_live_case(case: dict[str, Any], executor, tools, respond, run_id: str) -
     )
 
 
-def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
+def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[CaseResult]:
     # Imported lazily: the live suite is the only path that needs a real
     # Ollama connection, real local tools, and a real MCP server. Keeping this
     # import out of the module top level means the scripted suite (and the
     # rest of the test/import graph) never depends on any of that.
     from app import build_executor, build_mcp_servers, load_dotenv_if_present, register_mcp_tools
-    from llm import ModelResponse
+    from llm import OllamaModel
     from mcp_integration import McpClientManager, McpStartupError
 
     # Same gap-filling as app.py's main(): a local .env supplies Tracker
@@ -450,11 +456,10 @@ def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
 
         tools = registry.to_ollama_tools()
 
-        def respond(messages, declarations):
-            return ModelResponse(messages, declarations)
+        model = OllamaModel.for_profile(profile)
 
         return [
-            run_live_case(case, recording_executor, tools, respond, run_id)
+            run_live_case(case, recording_executor, tools, model.respond, run_id, profile)
             for case in cases
         ]
     finally:
@@ -462,7 +467,10 @@ def _run_live_cases(cases: list[dict[str, Any]]) -> list[CaseResult]:
 
 
 def run_suite(
-    suite: str, cases_path: Path, category: str | None = None
+    suite: str,
+    cases_path: Path,
+    category: str | None = None,
+    profile: ModelProfile | None = None,
 ) -> tuple[dict[str, int], list[CaseResult]]:
     cases = load_cases(cases_path)
     applicable = [case for case in cases if suite in case.get("modes", ["scripted", "live"])]
@@ -477,7 +485,7 @@ def run_suite(
             for case in applicable
         ]
     elif suite == "live":
-        results = _run_live_cases(applicable)
+        results = _run_live_cases(applicable, profile or resolve_model_profile())
     else:
         raise ValueError(f"Unknown suite: {suite}")
 
@@ -525,6 +533,12 @@ def write_results(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the lLLM agent evaluation suite.")
     parser.add_argument("--suite", choices=["scripted", "live"], default="scripted")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(MODEL_PROFILES),
+        default=None,
+        help="Model profile for the live suite (SPEC-017); ignored by the scripted suite.",
+    )
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES_PATH)
     parser.add_argument(
         "--category",
@@ -534,8 +548,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    summary, results = run_suite(args.suite, args.cases, args.category)
-    model_name = "scripted" if args.suite == "scripted" else MODEL_NAME
+    profile = resolve_model_profile(args.profile)
+    summary, results = run_suite(args.suite, args.cases, args.category, profile)
+    model_name = "scripted" if args.suite == "scripted" else profile.model
     result_path = write_results(args.suite, summary, results, model_name)
 
     for result in results:

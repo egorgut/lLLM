@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import time
@@ -5,7 +6,6 @@ from pathlib import Path
 
 from cli_activity import ActivityIndicator
 from config import (
-    AGENT_TURN_TIMEOUT_SECONDS,
     CHAT_HISTORY_PATH,
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_DESCRIPTION_CHARS,
@@ -15,14 +15,12 @@ from config import (
     MAX_SKILLS,
     MAX_TOOL_CALLS_PER_TURN,
     MCP_SERVERS,
-    MODEL_NAME,
-    MODEL_REQUEST_TIMEOUT_SECONDS,
+    MODEL_PROFILES,
     PROJECT_ROOT,
     SANDBOX_ARTIFACT_ROOT,
     SANDBOX_TOOL_ENABLED,
     SANDBOX_TURN_TIME_MARGIN_SECONDS,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
-    SKILL_ROUTING_TIMEOUT_SECONDS,
     SKILLS_ROOT,
     SQLITE_DATABASE_PATH,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
@@ -30,16 +28,18 @@ from config import (
     TRACE_ENABLED,
     TRACE_PAYLOAD_PREVIEW_CHARS,
     TRACKER_MCP_SERVER_ID,
+    ModelProfile,
+    resolve_model_profile,
 )
 from conversation import Conversation
-from llm import ModelResponse, ModelToolCall
+from llm import ModelToolCall, OllamaModel
 from mcp_integration import (
     McpClientManager,
     McpServerConfig,
     McpStartupError,
     load_tracker_server_config,
 )
-from reliability import TurnStatus, new_id
+from reliability import TurnStatus, new_id, validate_reliability_config
 from sandbox_tool import (
     SKILL_NAME as SANDBOX_SKILL_NAME,
     SandboxCapability,
@@ -232,7 +232,62 @@ def _rollback_artifacts(sandbox: SandboxCapability | None) -> None:
         pass
 
 
-def main() -> None:
+def describe_profile(profile: ModelProfile) -> str:
+    """The one-line startup summary of what this run is talking to."""
+
+    return (
+        f"{profile.name}: {profile.model} "
+        f"(request {profile.model_request_timeout_seconds:g}s, "
+        f"turn {profile.agent_turn_timeout_seconds:g}s, "
+        f"routing {profile.skill_routing_timeout_seconds:g}s)"
+    )
+
+
+def validate_model_profiles() -> None:
+    """Check every committed profile, not just the selected one (SPEC-017 §4.3).
+
+    A profile whose deadlines are internally incoherent is a repository defect
+    that would otherwise surface only for whoever first selects it, mid-turn.
+    The same host-owned rules SPEC-011 §10 applies to a single configuration
+    apply to each profile; the tool-execution budget and call limits are global,
+    so every profile is checked against those.
+    """
+
+    for name, profile in MODEL_PROFILES.items():
+        try:
+            validate_reliability_config(
+                model_request_timeout_seconds=profile.model_request_timeout_seconds,
+                tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
+                max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+                max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
+            )
+        except ValueError as error:
+            raise ValueError(f"Model profile '{name}' is invalid: {error}") from error
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Local AI chat.")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(MODEL_PROFILES),
+        default=None,
+        help=(
+            "Model profile to run under: which model, and the deadlines that "
+            "model needs (SPEC-017). Defaults to the host default profile."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    # The profile is resolved before anything else: it decides which model runs
+    # and which deadlines bound it, and an unknown name must never reach the
+    # chat loop (SPEC-017 §4.3).
+    validate_model_profiles()
+    profile = resolve_model_profile(args.profile)
+
     # Fill any gaps in the process environment from a local `.env` before
     # anything (e.g. Tracker's config loader) reads it. Real exported
     # variables always take precedence; a missing file is a no-op.
@@ -249,7 +304,13 @@ def main() -> None:
     trace_sink = SafeTraceSink(sink, run_id)
     run_started_at = time.monotonic()
     trace_sink.emit(
-        build_event("run_started", run_id=run_id, model_name=MODEL_NAME, app_version=None)
+        build_event(
+            "run_started",
+            run_id=run_id,
+            model_name=profile.model,
+            model_profile=profile.name,
+            app_version=None,
+        )
     )
 
     store = JsonConversationStore(CHAT_HISTORY_PATH)
@@ -306,7 +367,7 @@ def main() -> None:
         # to an unavailable tool is a fail-fast startup error, not a turn-time
         # event (SPEC-012 §15). The surrounding `finally` still closes MCP.
         validate_skill_config(
-            skill_routing_timeout_seconds=SKILL_ROUTING_TIMEOUT_SECONDS,
+            skill_routing_timeout_seconds=profile.skill_routing_timeout_seconds,
             skill_routing_repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
             max_skill_routing_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
             max_skill_instruction_chars=MAX_SKILL_INSTRUCTION_CHARS,
@@ -332,9 +393,15 @@ def main() -> None:
             print(f"Application startup failed: {error}")
             raise SystemExit(1)
 
+        # The transport is built here from the profile and injected, rather than
+        # read from a module-level constant at import time (SPEC-017 §4.4). The
+        # router and the agent loop share it, so both always speak to the same
+        # model under the same client timeout.
+        model = OllamaModel.for_profile(profile)
+
         router = SkillRouter(
-            route=lambda messages: "".join(ModelResponse(messages, None).text_chunks()),
-            timeout_seconds=SKILL_ROUTING_TIMEOUT_SECONDS,
+            route=model.text,
+            timeout_seconds=profile.skill_routing_timeout_seconds,
             max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
             repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
@@ -361,15 +428,15 @@ def main() -> None:
             router=router,
             tool_registry=registry,
             executor=executor,
-            respond=lambda messages, declarations: ModelResponse(messages, declarations),
+            respond=model.respond,
             renderer_factory=lambda: CliRenderer(indicator),
             default_tools=tools,
             run_id=run_id,
             max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
             max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-            model_request_timeout_seconds=MODEL_REQUEST_TIMEOUT_SECONDS,
+            model_request_timeout_seconds=profile.model_request_timeout_seconds,
             tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-            agent_turn_timeout_seconds=AGENT_TURN_TIMEOUT_SECONDS,
+            agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
             trace_sink=trace_sink,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
             on_selection=announce_skill,
@@ -385,6 +452,7 @@ def main() -> None:
             ),
         )
 
+        print(f"[model] {describe_profile(profile)}")
         for summary in manager.server_summaries():
             print(f"[mcp] {summary}")
         print(sandbox_diagnostic)
