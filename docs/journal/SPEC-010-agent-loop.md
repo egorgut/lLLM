@@ -179,8 +179,8 @@ no partial persistence; existing calculator/SQL/MCP protections are untouched.
 - **Patch:** [PATCH-010-01](../../patches/SPEC-010/PATCH-010-01-CLI-Turn-Activity-Indicator.md)
 - **Date:** 2026-08-11
 - **Branch:** patch/PATCH-010-01-cli-turn-activity-indicator
-- **Implementation commit:** _pending_
-- **Merge commit:** _pending_
+- **Implementation commit:** `3f07b17`
+- **Merge commit:** `4ab44fc`
 
 #### Reason
 
