@@ -9,7 +9,7 @@
 
 - Python 3.12+
 - [Ollama](https://ollama.com), запущенный локально
-- Скачанная модель (по умолчанию `qwen3:8b`)
+- Скачанная модель (по умолчанию `qwen3:8b`; для профиля `deep` — `qwen3:32b`)
 
 ## Установка
 
@@ -23,6 +23,7 @@ pip install -r requirements.txt
 
 ```bash
 ollama pull qwen3:8b
+ollama pull qwen3:32b   # опционально: только для профиля deep
 ```
 
 ## Запуск
@@ -30,7 +31,8 @@ ollama pull qwen3:8b
 Убедись, что Ollama слушает на `http://localhost:11434`, затем:
 
 ```bash
-python app.py
+python app.py                  # профиль по умолчанию: fast (qwen3:8b)
+python app.py --profile deep   # qwen3:32b и его дедлайны
 ```
 
 Введи сообщение и получи ответ модели. Ответ печатается инкрементально — по мере
@@ -42,6 +44,31 @@ python app.py
 
 Модели отправляется не вся сохранённая история, а системный промпт и последние
 `MAX_CONTEXT_MESSAGES` сообщений. Системный промпт в JSON не хранится.
+
+### Профили моделей (SPEC-017)
+
+Модель выбирается не именем, а **профилем**: имя модели вместе с дедлайнами,
+которые именно ей нужны. Замеры на M3 Max (обе модели Q4_K_M): решение роутера
+~3.6 с у `qwen3:8b` против ~11.3 с у `qwen3:32b`, решение агента с инструментами
+~11 с против ~40–47 с. Переиспользовать 8B-дедлайны для 32B нельзя — обычная
+латентность превратилась бы в `turn_timed_out`.
+
+| Профиль | Модель | Запрос | Ход | Роутинг |
+| --- | --- | --- | --- | --- |
+| `fast` (по умолчанию) | `qwen3:8b` | 120 с | 180 с | 30 с |
+| `deep` | `qwen3:32b` | 300 с | 600 с | 60 с |
+
+Активный профиль виден в первой строке запуска и в трассировке
+(`run_started.model_name` / `model_profile`):
+
+```text
+[model] deep: qwen3:32b (request 300s, turn 600s, routing 60s)
+```
+
+Профили host-owned: модель их не видит и не меняет, неизвестное имя — ошибка
+старта со списком допустимых. Живой evals-прогон выбирает профиль тем же флагом
+(`python -m evals.runner --suite live --profile deep`); scripted-набор от флага
+не зависит.
 
 ### Инструмент `python_calculate`
 
@@ -683,15 +710,21 @@ LLLM_SANDBOX_LIVE=1 python -m pytest tests/test_sandbox_tool_integration.py -q
 
 ```python
 OLLAMA_HOST = "http://localhost:11434"
-MODEL_NAME = "qwen3:8b"
 MAX_CONTEXT_MESSAGES = 20              # сколько последних сообщений уходит модели
 CHAT_HISTORY_PATH = "data/chat_history.json"  # где хранится история
 MAX_TOOL_CALLS_PER_TURN = 4           # предел исполненных инструментов за ход
 
+# Профили моделей (SPEC-017): модель + дедлайны, которые нужны именно ей.
+MODEL_PROFILES = {
+    "fast": ModelProfile("fast", "qwen3:8b", 120, 180, 30),
+    "deep": ModelProfile("deep", "qwen3:32b", 300, 600, 60),
+}
+DEFAULT_MODEL_PROFILE = "fast"
+
 # Надёжность агента (SPEC-011) — все значения host-owned, модель их не видит.
-MODEL_REQUEST_TIMEOUT_SECONDS = 120
+# Дедлайны модели живут в профиле; здесь остаётся то, что ограничивает работу
+# хоста и от выбора модели не зависит.
 TOOL_EXECUTION_TIMEOUT_SECONDS = 30
-AGENT_TURN_TIMEOUT_SECONDS = 180
 MAX_IDENTICAL_TOOL_CALLS = 2
 
 # Локальная структурированная трассировка (SPEC-011). Один файл на запуск,
@@ -764,9 +797,9 @@ SQLITE_DATABASE_PATH = ...  # сгенерированная база (в git н
 | `tracing.py`      | Структурированная трассировка: `TraceSink`/`JsonlTraceSink`/`SafeTraceSink`, построение событий |
 | `conversation.py` | Класс `Conversation` — владелец истории диалога          |
 | `storage.py`      | `JsonConversationStore` — сохранение истории в JSON       |
-| `llm.py`          | Клиент Ollama и вызов модели                             |
+| `llm.py`          | `OllamaModel` — транспорт, привязанный к профилю запуска, и стриминговый `ModelResponse` |
 | `prompts.py`      | Системный промпт                                         |
-| `config.py`       | Хост Ollama, имя модели, лимиты цикла/дедлайнов, настройки трассировки |
+| `config.py`       | Хост Ollama, профили моделей (SPEC-017), лимиты цикла/дедлайнов, настройки трассировки |
 | `tools/`          | Инструменты: реестр (`ToolSpec`/`ToolRegistry`), исполнитель (`ToolExecutor`), `python_calculate` и `sql_query` |
 | `skill_runtime/`  | Рантайм навыков (SPEC-012): модели, загрузчик/валидатор, реестр, роутер, композиция промпта, политика инструментов, оркестратор хода |
 | `skills/`         | Декларативные пакеты навыков (`sales_analysis/`, `tracker_read/`, `code_workspace/`: `SKILL.md`, `input.schema.json`, `examples/`, `evals/`) |
@@ -819,6 +852,12 @@ SQLITE_DATABASE_PATH = ...  # сгенерированная база (в git н
 `MAX_TOOL_CALLS_PER_TURN` последовательных вызовов инструментов с само-коррекцией
 по структурированным ошибкам, затем финальный ответ. Параллельные вызовы,
 несколько MCP-серверов и подагенты появятся в следующих шагах.
+
+Модель перестала быть константой (SPEC-017): выбирается **профиль** — модель
+вместе с её дедлайнами (`--profile fast|deep`). По умолчанию всё работает ровно
+как раньше, на `qwen3:8b`; `deep` поднимает `qwen3:32b` с бюджетами под его
+латентность. Сравнительный живой прогон evals на двух профилях пока не сделан —
+см. журнал SPEC-017.
 
 `sandbox_runtime/` (SPEC-015) даёт изолированную границу исполнения для
 произвольного Python/Bash в одноразовом Docker-контейнере, а `sandbox_tool/`

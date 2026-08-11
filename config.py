@@ -1,8 +1,55 @@
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 OLLAMA_HOST = "http://localhost:11434"
-MODEL_NAME = "qwen3:8b"
+
+
+# Model profiles (SPEC-017). A model is not a name on its own: the deadlines a
+# turn needs depend on how fast that model decides, so the selectable unit is
+# one bundle of "which model" plus "how long its decisions may take". Measured
+# warm on an Apple M3 Max (both models Q4_K_M): a routing response takes ~3.6 s
+# on qwen3:8b against ~11.3 s on qwen3:32b, and one tool-emitting agent decision
+# ~11 s against ~40-47 s. Reusing the 8B deadlines for a 32B model would turn
+# ordinary latency into spurious turn_timed_out outcomes.
+#
+# Everything here is host-owned (SPEC-011 §10): the model never sees, supplies,
+# or influences a profile, and the active profile is chosen once per run.
+@dataclass(frozen=True)
+class ModelProfile:
+    name: str
+    model: str
+    model_request_timeout_seconds: float
+    agent_turn_timeout_seconds: float
+    skill_routing_timeout_seconds: float
+
+
+MODEL_PROFILES = {
+    # The project's original numbers, unchanged: every journal from SPEC-005
+    # onwards was recorded under exactly this profile and stays reproducible.
+    "fast": ModelProfile("fast", "qwen3:8b", 120, 180, 30),
+    # Proposed from the measurements above with headroom for a four-call turn.
+    "deep": ModelProfile("deep", "qwen3:32b", 300, 600, 60),
+}
+DEFAULT_MODEL_PROFILE = "fast"
+
+
+def resolve_model_profile(name: str | None = None) -> ModelProfile:
+    """The profile to run under; `None` selects the host default.
+
+    An unknown name is a deployment mistake, not a turn-time event, so this
+    raises with the valid names rather than falling back to a default that
+    silently runs the wrong model.
+    """
+
+    if name is None:
+        name = DEFAULT_MODEL_PROFILE
+    try:
+        return MODEL_PROFILES[name]
+    except KeyError:
+        valid = ", ".join(sorted(MODEL_PROFILES))
+        raise ValueError(f"Unknown model profile '{name}'. Valid profiles: {valid}.") from None
+
 
 # Maximum number of stored messages sent to the model on each turn.
 # The full history is persisted on disk; only this window reaches the LLM.
@@ -20,9 +67,11 @@ MAX_TOOL_CALLS_PER_TURN = 4
 # None of these are ever supplied or changed by the model. Timeouts are
 # caller-side deadlines (see reliability.run_with_deadline): a component that
 # does not return in time is abandoned, not forcibly terminated.
-MODEL_REQUEST_TIMEOUT_SECONDS = 120
+#
+# The model-latency deadlines (request, whole turn, routing) moved into
+# ModelProfile above (SPEC-017), because their correct value depends on the
+# model. What stays here bounds *host* work, which no model choice changes.
 TOOL_EXECUTION_TIMEOUT_SECONDS = 30
-AGENT_TURN_TIMEOUT_SECONDS = 180
 MAX_IDENTICAL_TOOL_CALLS = 2
 
 # Local structured tracing (SPEC-011). Append-only JSONL, local-only, never
@@ -94,9 +143,8 @@ SQLITE_DATABASE_PATH = PROJECT_ROOT / "data" / "chinook.sqlite"
 # loaded lazily for that turn. All bounds below are host-owned and validated at
 # startup (skill_runtime.config_validation.validate_skill_config).
 SKILLS_ROOT = PROJECT_ROOT / "skills"
-# Skill routing has its own component timeout but still counts against the whole
-# AGENT_TURN_TIMEOUT_SECONDS budget shared with agent execution.
-SKILL_ROUTING_TIMEOUT_SECONDS = 30
+# Skill routing has its own component timeout (ModelProfile.skill_routing_timeout_seconds,
+# SPEC-017) but still counts against the whole-turn budget shared with agent execution.
 # Additional routing requests permitted after the first; 1 => at most two total.
 SKILL_ROUTING_REPAIR_ATTEMPTS = 1
 MAX_SKILL_ROUTING_RESPONSE_CHARS = 2_000
