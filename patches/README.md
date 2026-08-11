@@ -146,13 +146,14 @@ PATCH — give each defect its own PATCH or SPEC.
 
 ## Examples
 
-**`PATCH-010-01` — Prevent repeated identical tool calls** (PATCH, not SPEC):
+**`PATCH-010-02` — Prevent repeated identical tool calls** (PATCH, not SPEC):
 parent `specs/SPEC-010-Agent-Loop.md` already defines the agent loop; this
 would only harden an existing termination path (detect consecutive identical
 tool calls, terminate with an explicit reason) — no new capability, no
 contract change. Because the fix depends on model output, it needs a
-standalone journal: `docs/journal/patches/PATCH-010-01-repeated-tool-call-detection.md`.
-This is illustrative only — no such PATCH has been written or implemented.
+standalone journal: `docs/journal/patches/PATCH-010-02-repeated-tool-call-detection.md`.
+This is illustrative only — no such PATCH has been written or implemented
+(`PATCH-010-01` is the CLI activity indicator, and its number is taken).
 
 **"Add persistent cross-session memory to the agent"** (SPEC, not PATCH):
 introduces a new capability, new storage and lifecycle semantics, and new

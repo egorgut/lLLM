@@ -171,3 +171,118 @@ no partial persistence; existing calculator/SQL/MCP protections are untouched.
 - Side-effect transaction policy once write-capable tools arrive (current tools
   are read-only/compute, so turn rollback can't undo external effects).
 - Optional committed `tests/` suite to end the recurring journal-only deviation.
+
+## Patches
+
+### PATCH-010-01 — CLI Turn Activity Indicator
+
+- **Patch:** [PATCH-010-01](../../patches/SPEC-010/PATCH-010-01-CLI-Turn-Activity-Indicator.md)
+- **Date:** 2026-08-11
+- **Branch:** patch/PATCH-010-01-cli-turn-activity-indicator
+- **Implementation commit:** _pending_
+- **Merge commit:** _pending_
+
+#### Reason
+
+This step's presentation prints only durable output — `[skill]`, `[tool N/4]`,
+`[args]`, `[result]`, streamed `Qwen: …`, errors. Everything between those is
+silent, and the silence is not short. Measured on the live smoke run below:
+skill routing, then the first model decision, then tool execution, then the next
+model decision — ten distinct silent stretches across three turns, the longest
+well over ten seconds on qwen3:8b, and worse on a larger local model. As the
+"Streaming note" above records, a tool-selecting response streams **no** text at
+all, so the terminal shows literally nothing between the user's Enter and the
+first `[tool …]` line. A user cannot tell that from a hung process.
+
+#### Change
+
+Presentation only; no agent policy, prompt, tool contract, transport, tracing,
+persistence, or model change.
+
+- `cli_activity.py` (new): `ActivityIndicator` — a one-line `⠋ Working...`
+  spinner. `start()`/`stop()` are idempotent and callable from any thread, which
+  the loop requires: `tool_call`/`tool_result` arrive on the main thread while
+  `text` arrives on the deadline worker thread (`agent.py`). `start()` draws the
+  first frame **synchronously on the calling thread**, so activity is visible the
+  moment a wait begins rather than one tick later, then hands off to a daemon
+  thread animating on `Event.wait`. `stop()` sets the event and **joins before
+  erasing**, so no frame can reach the stream after it returns — that is what
+  makes it safe for the caller to print immediately afterwards. Only `\r` and
+  spaces, never an ANSI escape. It is also a context manager.
+- `app.py`: `CliRenderer` takes the indicator and drives the lifecycle around
+  each durable line — stop before `[tool …]`/`[args]`, restart for the tool's own
+  (silent) execution, stop before `[result]`, restart for the next model
+  decision, stop once and for all on the first final-answer chunk. `announce_skill`
+  does the same around `[skill]`. The chat loop owns one indicator for the session
+  and wraps the turn in `with indicator:` — routing's silence starts before any
+  renderer exists, and `__exit__` covers every exit path, including a mid-turn
+  `KeyboardInterrupt`, a timeout outcome, and an unexpected exception.
+- The `agent.Renderer` protocol is unchanged, so `RecordingRenderer` and
+  `evals/runner.py` needed no edits.
+- Non-TTY stdout writes **nothing at all** — not even a static line — so piped
+  output, test captures, evals, and every transcript already committed to
+  `README.md` and these journals stay byte-for-byte what they were.
+- Housekeeping in the same patch: the patch note was moved from `specs/` to its
+  conventional home `patches/SPEC-010/`.
+
+#### Verification
+
+- `python -m pytest tests/test_cli_activity.py -q` — 19 passed. New file covers
+  non-TTY silence (including "no `\r` and no frame character in captured turn
+  output"), synchronous first frame, erasure leaving an empty line, idempotent
+  start/stop, daemon thread with no survivor after `stop()`, a cross-thread stop
+  writing nothing after it returns, `with` clearing on a controlled error / an
+  unexpected exception / a `KeyboardInterrupt`, renderer ordering against every
+  durable line, unchanged default rendering, a real two-tool `AgentRunner` turn
+  asserting the full start/stop interleaving, and a timed-out turn leaving no
+  indicator or thread behind. Only one check depends on timing (that the
+  animation advances at all) and it is bounded, not a fixed sleep.
+- `python -m pytest -q` — 574 passed, 29 skipped. No regression in the agent,
+  skills, tool, MCP, sandbox, persistence, or reliability suites.
+- Non-TTY, live: `printf '…\n/bye\n' | python app.py` exited `0` with **zero**
+  `\r` bytes in stdout and output identical in shape to pre-patch.
+- Live TTY smoke test: `app.py` driven inside a real pty against qwen3:8b —
+  (1) a plain question, (2) a `python_calculate` question, (3) a two-tool
+  `sales_analysis` question. The raw byte capture contains **764** spinner
+  frames, **10** erase sequences, and **0** ANSI escapes. Ten erasures is exactly
+  the number of silent stretches the three turns contain (1 + 3 + 6), i.e. every
+  restart was matched by a stop before durable output. Replaying the carriage
+  returns the way a terminal does leaves **0** lines showing a spinner frame, and
+  the reconstructed transcript is indistinguishable from a pre-patch one:
+
+```text
+You: Сколько будет 1234 * 5678? Посчитай.
+
+[tool 1/4] python_calculate
+[args] {"expression": "1234 * 5678"}
+[result] {"ok": true, "result": 7006652}
+
+Qwen: 1234 умножить на 5678 равно **7 006 652**.
+
+You: Какой жанр принёс больше всего выручки? А сколько треков в этом жанре?
+[skill] sales_analysis
+
+[tool 1/4] sql_query
+...
+[tool 2/4] sql_query
+[args] {"query": "SELECT COUNT(*) AS TrackCount FROM Track WHERE GenreId = (...)"}
+[result] {"ok": true, "columns": ["TrackCount"], "rows": [[1297]], ...}
+
+Qwen: Жанр **Rock** принёс больше всего выручки — **826.65 долларов**. В этом
+жанре **1297 треков**.
+```
+
+  The raw bytes around each hand-off show the intended shape, e.g.
+  `…⠧ Working...\r` + `␣×12` + `\r` + `\r\n[tool 1/4] python_calculate`.
+- No live *model-behavior* journal is required: the patch changes deterministic
+  presentation only, and the model saw exactly the same prompts, tools, and
+  results as before.
+
+#### Outcome
+
+All acceptance criteria met. One deliberate refinement over the patch note's
+literal lifecycle, recorded in the note itself: the indicator also runs during
+tool *execution* (restarted after `[args]`), because that stretch is silent too
+and a sandbox call can hold it for a while. Scope stayed inside the patch — no
+new dependency, no configuration, no percentages/ETA/telemetry, no colors or
+terminal UI, and no unrelated CLI cleanup.

@@ -3,6 +3,7 @@ import os
 import time
 from pathlib import Path
 
+from cli_activity import ActivityIndicator
 from config import (
     AGENT_TURN_TIMEOUT_SECONDS,
     CHAT_HISTORY_PATH,
@@ -180,20 +181,37 @@ class CliRenderer:
     ``Qwen: `` prefix has been printed yet, so it appears exactly once, only when
     real final-answer text arrives. A turn that resolves entirely through tool
     calls never shows an empty ``Qwen:`` line.
+
+    It also drives the CLI's activity indicator (PATCH-010-01), because the
+    renderer is what knows when a silent stretch ends and when the next one
+    begins. The indicator itself is owned by the chat loop, since the first
+    silence -- skill routing -- starts before any renderer exists.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, indicator: ActivityIndicator | None = None) -> None:
         self._printed_prefix = False
+        self._indicator = (
+            indicator if indicator is not None else ActivityIndicator(enabled=False)
+        )
 
     def tool_call(self, call: ModelToolCall, used: int, maximum: int) -> None:
+        self._indicator.stop()
         print(f"\n[tool {used}/{maximum}] {call.name}")
         print(f"[args] {json.dumps(call.arguments, ensure_ascii=False)}")
+        # Executing the tool is silent too, and a sandbox call can take a while.
+        self._indicator.start()
 
     def tool_result(self, result: dict) -> None:
+        self._indicator.stop()
         print(f"[result] {json.dumps(result, ensure_ascii=False)}")
+        # The model's next decision follows, with nothing to show until it lands.
+        self._indicator.start()
 
     def text(self, chunk: str) -> None:
         if not self._printed_prefix:
+            # The final answer has begun: stop for good, once, rather than on
+            # every chunk. Runs on the loop's worker thread (agent.py).
+            self._indicator.stop()
             print("\nQwen: ", end="", flush=True)
             self._printed_prefix = True
         print(chunk, end="", flush=True)
@@ -322,11 +340,21 @@ def main() -> None:
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
         )
 
+        # One indicator for the whole session, started and stopped per turn. It
+        # is created here rather than inside CliRenderer because the turn's first
+        # silence is skill routing, which happens before a renderer exists
+        # (PATCH-010-01). Outside an interactive terminal it is a no-op.
+        indicator = ActivityIndicator()
+
         def announce_skill(selection: SkillSelection) -> None:
             # Print the [skill] line only when a skill is selected, before the
             # agent loop's tool/answer output (SPEC-012 §"User-visible behavior").
+            # This line is printed outside the renderer, so it clears the
+            # indicator itself; the agent loop's own silence follows right after.
             if selection.skill_name:
+                indicator.stop()
                 print(f"[skill] {selection.skill_name}")
+                indicator.start()
 
         orchestrator = SkillTurnOrchestrator(
             skill_registry=skill_registry,
@@ -334,7 +362,7 @@ def main() -> None:
             tool_registry=registry,
             executor=executor,
             respond=lambda messages, declarations: ModelResponse(messages, declarations),
-            renderer_factory=CliRenderer,
+            renderer_factory=lambda: CliRenderer(indicator),
             default_tools=tools,
             run_id=run_id,
             max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
@@ -399,7 +427,12 @@ def main() -> None:
             conversation.add_user_message(user_message)
 
             try:
-                result = orchestrator.run_turn(conversation)
+                # The indicator covers every silent stretch of the turn and is
+                # always cleared on the way out -- controlled error, timeout,
+                # KeyboardInterrupt, or an unexpected exception alike -- so the
+                # outcome branches below always print on a clean line.
+                with indicator:
+                    result = orchestrator.run_turn(conversation)
             except Exception:
                 # A safety net beyond AgentRunner's own internal_error
                 # conversion: the terminal trace event is already guaranteed by
