@@ -3,8 +3,8 @@
 - **Spec:** [SPEC-017](../../specs/SPEC-017-Model-Profiles.md)
 - **Date:** 2026-08-11
 - **Branch:** feature/SPEC-017-model-profiles
-- **Implementation commit:** _pending_
-- **Merge commit:** _pending_
+- **Implementation commit:** `91b72ae`
+- **Merge commit:** `c8d048f`
 
 ## Hypothesis / intent
 
