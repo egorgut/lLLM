@@ -79,6 +79,10 @@ class CaseResult:
     selected_skill: str | None = None
     selection_source: str | None = None
     routing_requests: int | None = None
+    # SPEC-018: the router's choice is no longer necessarily the turn's last
+    # word, so a skill case reports both ends of the decision.
+    final_skill: str | None = None
+    skill_activations: int | None = None
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -319,6 +323,8 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
         selected_skill=result.selection.skill_name,
         selection_source=result.selection.source,
         routing_requests=result.selection.routing_requests,
+        final_skill=result.final_skill,
+        skill_activations=result.activations,
     )
 
 
@@ -519,6 +525,8 @@ def write_results(
                 "selected_skill": result.selected_skill,
                 "selection_source": result.selection_source,
                 "routing_requests": result.routing_requests,
+                "final_skill": result.final_skill,
+                "skill_activations": result.skill_activations,
                 "tool_calls": result.tool_calls,
                 "duration_ms": result.duration_ms,
                 "failures": result.failures,

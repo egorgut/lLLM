@@ -9,6 +9,7 @@ from config import (
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_DESCRIPTION_CHARS,
     MAX_SKILL_INSTRUCTION_CHARS,
+    MAX_SKILL_ACTIVATIONS_PER_TURN,
     MAX_SKILL_ROUTING_RESPONSE_CHARS,
     MAX_SKILL_SCHEMA_BYTES,
     MAX_SKILLS,
@@ -51,7 +52,7 @@ from skill_runtime import (
     SkillTurnOrchestrator,
     validate_skill_config,
 )
-from skill_runtime.models import SkillSelection
+from skill_runtime.models import SkillSelection, SkillSpec
 from storage import JsonConversationStore
 from tool_render import format_tool_args, format_tool_result
 from tools import (
@@ -377,6 +378,7 @@ def main(argv: list[str] | None = None) -> None:
             max_skill_schema_bytes=MAX_SKILL_SCHEMA_BYTES,
             max_skills=MAX_SKILLS,
             max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
+            max_skill_activations_per_turn=MAX_SKILL_ACTIVATIONS_PER_TURN,
         )
         # tracker_read depends entirely on the (possibly disabled) Tracker
         # integration; when it is disabled, its tools were never registered,
@@ -426,6 +428,15 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"[skill] {selection.skill_name}")
                 indicator.start()
 
+        def announce_activation(spec: SkillSpec, replaced: str | None) -> None:
+            # A mid-turn switch must be as visible as the initial selection
+            # (SPEC-018 §4.11), and distinguishable from it: the line says what
+            # it replaced, so a transcript shows which view each tool ran under.
+            indicator.stop()
+            origin = f"replacing {replaced}" if replaced else "activated mid-turn"
+            print(f"[skill] {spec.name} ({origin})")
+            indicator.start()
+
         orchestrator = SkillTurnOrchestrator(
             skill_registry=skill_registry,
             router=router,
@@ -443,6 +454,8 @@ def main(argv: list[str] | None = None) -> None:
             trace_sink=trace_sink,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
             on_selection=announce_skill,
+            max_skill_activations=MAX_SKILL_ACTIVATIONS_PER_TURN,
+            on_activation=announce_activation,
             # Binds each sandbox turn to the turn_id and deadline the
             # orchestrator mints, before routing spends any of it.
             on_turn_context=(

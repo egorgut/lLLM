@@ -13,6 +13,12 @@ of that, every turn now:
 - returns one explicit `AgentTurnOutcome` instead of a bare string or an
   undifferentiated exception (SPEC-011 §"Core architectural decisions" #1).
 
+SPEC-018 adds one general notion on top: a *control tool* — a tool the host
+handles itself, because handling it changes the turn's own view (its tool
+declarations, its executor, its system-level block). The loop knows only that
+such a tool exists and how to apply what its handler returns; it knows nothing
+about what any control tool *means*.
+
 The runner owns *loop policy only*. It does not own persistent chat storage,
 CLI commands, MCP process lifecycle, tool registration, or any tool
 implementation — those stay with the caller. Model transport, rendering, the
@@ -78,6 +84,38 @@ class Renderer(Protocol):
 Respond = Callable[[list[dict[str, Any]], Sequence[dict[str, Any]]], ModelResponseLike]
 
 
+@dataclass(frozen=True)
+class ControlResult:
+    """What a control tool returns: a model-facing result, plus optional new view.
+
+    Each of the three view fields is ``None`` when that part of the turn is
+    unchanged, so a handler that only wants to report something (a recoverable
+    error, say) leaves the running turn exactly as it was.
+    """
+
+    result: dict[str, Any]
+    # New model-facing tool declarations; None leaves the current ones in place.
+    tools: tuple[dict[str, Any], ...] | None = None
+    # New executor for every subsequent call; None keeps the current one.
+    executor: Any | None = None
+    # New host-owned system-level block; None keeps the current one.
+    system_suffix: str | None = None
+
+
+class ControlToolHandler(Protocol):
+    """A host-handled tool the loop must not dispatch to the ``ToolExecutor``.
+
+    ``names`` is the closed set of tool names this handler owns. The loop still
+    applies every pre-dispatch policy (parallel calls, repeated calls, the
+    tool-call budget) and the same tool-execution deadline; only the dispatch
+    target differs. The loop never inspects what a control tool means.
+    """
+
+    names: frozenset[str]
+
+    def handle(self, name: str, arguments: dict[str, Any]) -> ControlResult: ...
+
+
 def assistant_tool_message(call: ModelToolCall) -> dict:
     """The temporary assistant message that records a tool call for the model.
 
@@ -137,6 +175,8 @@ class AgentRunner:
         id_factory: Callable[[], str] = new_id,
         payload_preview_chars: int = 1000,
         redacted_argument_tools: frozenset[str] = frozenset(),
+        control_handler: ControlToolHandler | None = None,
+        extra_turn_fields: Callable[[], dict[str, Any]] = lambda: {},
     ) -> None:
         # All numeric limits are host-owned; reject an incoherent configuration
         # at construction time rather than mid-turn (SPEC-011 §10).
@@ -169,10 +209,20 @@ class AgentRunner:
         # input files are the user's files. Host-owned and name-based, so this
         # stays one generic rule rather than sandbox-specific loop logic.
         self._redacted_argument_tools = redacted_argument_tools
+        # Tools the host handles itself because they change the turn's own view
+        # (SPEC-018 §4.1). None means every tool call goes to the executor.
+        self._control_handler = control_handler
+        # Extra fields the host contributes to the terminal trace event, read at
+        # emit time so they can reflect state the turn changed while running.
+        self._extra_turn_fields = extra_turn_fields
         # Per-turn skill context (SPEC-012); (re)assigned at the top of run_turn.
         self._selected_skill: str | None = None
         self._skill_version: str | None = None
         self._routing_model_requests = 0
+        # The content of the caller's leading system message, if any, kept so a
+        # control tool can replace the host block appended to it without ever
+        # stacking two blocks (SPEC-018 §4.8). None = the caller sent none.
+        self._system_base: str | None = None
 
     def run_turn(
         self,
@@ -183,6 +233,7 @@ class AgentRunner:
         selected_skill: str | None = None,
         skill_version: str | None = None,
         routing_model_requests: int = 0,
+        system_suffix: str | None = None,
     ) -> AgentTurnOutcome:
         """Drive the loop until a terminal outcome and return it.
 
@@ -200,6 +251,11 @@ class AgentRunner:
         to the agent's own model requests so `model_requests` means "all model
         requests made for the user turn"; `selected_skill`/`skill_version` enrich
         the trace only.
+
+        `system_suffix` (SPEC-018) is a host-owned block appended to the caller's
+        leading system message for this turn. It is passed separately rather than
+        baked into `messages` so a control tool can *replace* it later without
+        the loop having to tell base prompt and host block apart.
         """
 
         if turn_context is not None:
@@ -213,6 +269,11 @@ class AgentRunner:
         self._selected_skill = selected_skill
         self._skill_version = skill_version
         self._routing_model_requests = routing_model_requests
+        self._system_base = (
+            messages[0]["content"]
+            if messages and messages[0].get("role") == "system"
+            else None
+        )
         counters = _Counters()
 
         self._trace.emit(
@@ -234,7 +295,9 @@ class AgentRunner:
         )
 
         try:
-            final_text = self._drive_loop(messages, turn_id, deadline, counters)
+            final_text = self._drive_loop(
+                messages, turn_id, deadline, counters, system_suffix
+            )
         except AgentRuntimeError as error:
             outcome = self._outcome(
                 turn_id, start, error.reason, None, counters, error_message=str(error)
@@ -293,23 +356,54 @@ class AgentRunner:
         )
 
     def _emit_turn_finished(self, outcome: AgentTurnOutcome) -> None:
+        fields: dict[str, Any] = {
+            "status": str(outcome.status),
+            "reason": str(outcome.reason),
+            "tool_calls_executed": outcome.tool_calls_executed,
+            "model_requests": outcome.model_requests,
+            "routing_model_requests": self._routing_model_requests,
+            "agent_model_requests": outcome.model_requests - self._routing_model_requests,
+            "selected_skill": self._selected_skill,
+            "skill_version": self._skill_version,
+            "final_text_chars": len(outcome.final_text) if outcome.final_text else 0,
+            "duration_ms": outcome.duration_ms,
+        }
+        # Host-contributed fields win: a control tool may have changed something
+        # the loop reported at the start of the turn (SPEC-018 §4.9). Guarded,
+        # because exactly one terminal event is guaranteed for every turn and a
+        # defect in the caller's closure must not be what prevents it.
+        try:
+            fields.update(self._extra_turn_fields())
+        except Exception:  # noqa: BLE001 - the terminal event matters more
+            pass
         self._trace.emit(
             build_event(
                 "turn_finished",
                 run_id=self._run_id,
                 turn_id=outcome.turn_id,
-                status=str(outcome.status),
-                reason=str(outcome.reason),
-                tool_calls_executed=outcome.tool_calls_executed,
-                model_requests=outcome.model_requests,
-                routing_model_requests=self._routing_model_requests,
-                agent_model_requests=outcome.model_requests - self._routing_model_requests,
-                selected_skill=self._selected_skill,
-                skill_version=self._skill_version,
-                final_text_chars=len(outcome.final_text) if outcome.final_text else 0,
-                duration_ms=outcome.duration_ms,
+                **fields,
             )
         )
+
+    def _set_system_suffix(
+        self, working_messages: list[dict[str, Any]], suffix: str | None
+    ) -> None:
+        """Rewrite the leading system message as base + *at most one* host block.
+
+        Always composed from the base captured at the start of the turn, never
+        from the current content, so a replacement can neither stack a second
+        block nor leave a stale one behind (SPEC-018 §4.8). The message object is
+        replaced rather than mutated, so the caller's own list is untouched.
+        """
+
+        if self._system_base is None and not suffix:
+            return
+        base = self._system_base or ""
+        content = f"{base}\n\n{suffix}" if base and suffix else (suffix or base)
+        if working_messages and working_messages[0].get("role") == "system":
+            working_messages[0] = {**working_messages[0], "content": content}
+        else:
+            working_messages.insert(0, {"role": "system", "content": content})
 
     def _drive_loop(
         self,
@@ -317,8 +411,15 @@ class AgentRunner:
         turn_id: str,
         deadline: float,
         counters: _Counters,
+        system_suffix: str | None = None,
     ) -> str:
         working_messages = list(messages)
+        # The view a control tool may replace. Loop-local, not instance state:
+        # one turn's activation must never leak into the next (SPEC-018 §4.10).
+        working_tools: Sequence[dict[str, Any]] = self._tools
+        working_executor = self._executor
+        if system_suffix:
+            self._set_system_suffix(working_messages, system_suffix)
         last_fingerprint: str | None = None
         consecutive_identical_count = 0
         step = 0
@@ -352,7 +453,9 @@ class AgentRunner:
             model_start = self._clock()
             try:
                 text, tool_calls = run_with_deadline(
-                    lambda: self._consume_model_response(working_messages, abandoned),
+                    lambda: self._consume_model_response(
+                        working_messages, working_tools, abandoned
+                    ),
                     timeout_seconds=effective_model_timeout,
                     thread_name=f"model-step-{step}",
                 )
@@ -485,6 +588,15 @@ class AgentRunner:
                 raise TurnTimeoutExceeded("Agent turn exceeded its total time limit.")
             effective_tool_timeout = min(self._tool_execution_timeout_seconds, remaining)
 
+            # A control tool is handled by the host instead of the executor,
+            # because handling it changes this turn's own view. Everything else
+            # about the call — every policy above, the deadline below, the trace
+            # events, the transcript append — is identical (SPEC-018 §4.1).
+            is_control = (
+                self._control_handler is not None
+                and call.name in self._control_handler.names
+            )
+
             self._trace.emit(
                 build_event(
                     "tool_execution_started",
@@ -492,17 +604,29 @@ class AgentRunner:
                     turn_id=turn_id,
                     tool_call_index=tool_call_index,
                     tool_name=call.name,
+                    control_tool=is_control,
                     effective_timeout_ms=int(effective_tool_timeout * 1000),
                 )
             )
 
+            control: ControlResult | None = None
             tool_start = self._clock()
             try:
-                result = run_with_deadline(
-                    lambda: self._executor.execute(call.name, call.arguments),
-                    timeout_seconds=effective_tool_timeout,
-                    thread_name=f"tool-{tool_call_index}",
-                )
+                if is_control:
+                    handler = self._control_handler
+                    control = run_with_deadline(
+                        lambda: handler.handle(call.name, call.arguments),
+                        timeout_seconds=effective_tool_timeout,
+                        thread_name=f"control-{tool_call_index}",
+                    )
+                    result = control.result
+                else:
+                    executor = working_executor
+                    result = run_with_deadline(
+                        lambda: executor.execute(call.name, call.arguments),
+                        timeout_seconds=effective_tool_timeout,
+                        thread_name=f"tool-{tool_call_index}",
+                    )
             except SkillPolicyViolation as violation:
                 # A disallowed tool never reached its handler (the restricted
                 # executor raised before dispatch). This is a deliberate policy
@@ -528,6 +652,25 @@ class AgentRunner:
                         tool_name=call.name,
                         result_ok=False,
                         error_type="policy_violation",
+                        duration_ms=int((self._clock() - tool_start) * 1000),
+                    )
+                )
+                raise
+            except AgentRuntimeError:
+                # A control handler may fail the turn with a controlled reason of
+                # its own. It already carries the right TerminationReason, so it
+                # passes through rather than being flattened into a generic
+                # tool_execution_error. Nothing on the ordinary executor path
+                # raises this (a handler contract breach is ToolExecutionError).
+                self._trace.emit(
+                    build_event(
+                        "tool_execution_finished",
+                        run_id=self._run_id,
+                        turn_id=turn_id,
+                        tool_call_index=tool_call_index,
+                        tool_name=call.name,
+                        result_ok=False,
+                        error_type="control_error",
                         duration_ms=int((self._clock() - tool_start) * 1000),
                     )
                 )
@@ -577,6 +720,16 @@ class AgentRunner:
             )
             self._renderer.tool_result(result)
 
+            if control is not None:
+                # Each field is independent, and None means "unchanged" — a
+                # handler reporting a recoverable error changes nothing at all.
+                if control.tools is not None:
+                    working_tools = control.tools
+                if control.executor is not None:
+                    working_executor = control.executor
+                if control.system_suffix is not None:
+                    self._set_system_suffix(working_messages, control.system_suffix)
+
             # Append the action and its observation to the working transcript
             # so the next model request sees every prior tool result from this
             # turn.
@@ -588,7 +741,10 @@ class AgentRunner:
             )
 
     def _consume_model_response(
-        self, working_messages: list[dict[str, Any]], abandoned: threading.Event
+        self,
+        working_messages: list[dict[str, Any]],
+        working_tools: Sequence[dict[str, Any]],
+        abandoned: threading.Event,
     ) -> tuple[str, list[ModelToolCall]]:
         """Runs on the deadline worker thread: stream text, then read tool_calls.
 
@@ -598,7 +754,7 @@ class AgentRunner:
         already been shown (the renderer is not thread-safe against that).
         """
 
-        response = self._respond(working_messages, self._tools)
+        response = self._respond(working_messages, working_tools)
         parts: list[str] = []
         for chunk in response.text_chunks():
             parts.append(chunk)
