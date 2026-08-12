@@ -133,7 +133,12 @@ def test_explicit_skill_selection_restricts_tools():
     assert result.outcome.status is TurnStatus.COMPLETED
     assert executor.calls == [("sql_query", {"query": "SELECT 1"})]
     started = next(e for e in trace.events if e["event"] == "turn_started")
-    assert started["available_tools"] == ["sql_query", "python_calculate"]
+    # The skill's own tools, plus the host's reserved activation tool (SPEC-018).
+    assert started["available_tools"] == [
+        "sql_query",
+        "python_calculate",
+        "activate_skill",
+    ]
     assert started["selected_skill"] == "sales_analysis"
 
 

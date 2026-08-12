@@ -13,6 +13,7 @@ def validate_skill_config(
     max_skill_schema_bytes: int,
     max_skills: int,
     max_skill_description_chars: int,
+    max_skill_activations_per_turn: int,
 ) -> None:
     if skill_routing_timeout_seconds <= 0:
         raise ValueError(
@@ -30,6 +31,10 @@ def validate_skill_config(
         ("max_skill_schema_bytes", max_skill_schema_bytes),
         ("max_skills", max_skills),
         ("max_skill_description_chars", max_skill_description_chars),
+        # 0 is rejected rather than read as "disable mid-turn activation": the
+        # declaration would still be offered to the model, so every call would
+        # fail. Removing the capability is a code decision, not a limit of 0.
+        ("max_skill_activations_per_turn", max_skill_activations_per_turn),
     ):
         if value < 1:
             raise ValueError(f"{name} must be at least 1, got {value}.")

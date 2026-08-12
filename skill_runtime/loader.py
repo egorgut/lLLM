@@ -36,6 +36,7 @@ from config import (
     MAX_SKILLS,
 )
 from reliability import canonical_json, sha256_of
+from skill_runtime.activation import ACTIVATE_SKILL_TOOL_NAME, reserved_name_conflict
 from skill_runtime.models import SkillSpec, read_only_schema
 from skill_runtime.registry import SkillRegistry
 from tools import ToolRegistry
@@ -97,6 +98,13 @@ class SkillPackageLoader:
         check below (symlink rejection, directory-name pattern, MAX_SKILLS
         count), and every *other* package's fail-fast validation is unchanged.
         """
+
+        # `activate_skill` is the host's own mid-turn activation tool (SPEC-018
+        # §4.2). Checked before anything else, and regardless of whether any
+        # skill package exists, because the collision is in the tool registry.
+        conflict = reserved_name_conflict(tool_registry)
+        if conflict is not None:
+            raise SkillPackageError(conflict)
 
         registry = SkillRegistry()
         root = Path(skills_root)
@@ -225,6 +233,14 @@ def _validate_package_name(package_name: str) -> None:
         raise SkillPackageError(
             f"Invalid skill package directory name: {package_name!r} "
             f"(must match {_NAME_PATTERN.pattern})."
+        )
+    # A skill named after the host's activation tool would make one name mean
+    # two things to the model (SPEC-018 §4.2). The declared name must equal the
+    # directory name, so checking here covers both.
+    if package_name == ACTIVATE_SKILL_TOOL_NAME:
+        raise SkillPackageError(
+            f"Skill name '{ACTIVATE_SKILL_TOOL_NAME}' is reserved by the host for "
+            "mid-turn skill activation."
         )
 
 

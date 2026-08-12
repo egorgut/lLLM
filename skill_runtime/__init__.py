@@ -12,6 +12,11 @@ name); tools never depend on skills, and a skill can only ever *reduce* the
 global tool set, never widen capability.
 """
 
+from skill_runtime.activation import (
+    ACTIVATE_SKILL_TOOL_NAME,
+    SkillActivationHandler,
+    build_activate_skill_declaration,
+)
 from skill_runtime.config_validation import validate_skill_config
 from skill_runtime.loader import SkillPackageError, SkillPackageLoader
 from skill_runtime.models import SkillCatalogEntry, SkillSelection, SkillSpec
@@ -22,7 +27,9 @@ from skill_runtime.registry import SkillRegistry
 from skill_runtime.router import SkillRouter, parse_explicit_selection
 
 __all__ = [
+    "ACTIVATE_SKILL_TOOL_NAME",
     "RestrictedToolExecutor",
+    "SkillActivationHandler",
     "SkillCatalogEntry",
     "SkillPackageError",
     "SkillPackageLoader",
@@ -31,6 +38,7 @@ __all__ = [
     "SkillSelection",
     "SkillSpec",
     "SkillTurnOrchestrator",
+    "build_activate_skill_declaration",
     "compose_active_skill",
     "declarations_for_names",
     "parse_explicit_selection",

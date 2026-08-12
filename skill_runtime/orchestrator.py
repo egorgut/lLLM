@@ -7,6 +7,12 @@ view, then hands off to the unchanged bounded, observable ``AgentRunner`` with t
 shared deadline. Routing and execution therefore share one ``run_id``/``turn_id``
 and one whole-turn budget; ``duration_ms`` and ``model_requests`` cover both.
 
+The router remains the mandatory entry decision. What SPEC-018 adds is that the
+composed view is no longer frozen for the whole turn: the orchestrator also hands
+the runner a :class:`SkillActivationHandler`, so the model can replace the active
+skill mid-turn through the host-owned ``activate_skill`` tool. At most one skill
+is ever active at an instant — activation replaces, it never stacks.
+
 The orchestrator never persists routing protocol messages and never mutates the
 conversation — it only reads the latest user message and a bounded context slice
 for routing. Persistence and rollback stay with the caller, keyed off the returned
@@ -18,7 +24,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from agent import AgentRunner, Renderer, Respond
+from agent import AgentRunner, ControlToolHandler, Renderer, Respond
+from config import MAX_SKILL_ACTIVATIONS_PER_TURN
 from conversation import Conversation
 from reliability import (
     STATUS_BY_REASON,
@@ -29,7 +36,12 @@ from reliability import (
     TurnContext,
     new_id,
 )
-from skill_runtime.models import SkillSelection
+from skill_runtime.activation import (
+    ACTIVATE_SKILL_TOOL_NAME,
+    SkillActivationHandler,
+    build_activate_skill_declaration,
+)
+from skill_runtime.models import SkillSelection, SkillSpec
 from skill_runtime.policy import RestrictedToolExecutor, declarations_for_names
 from skill_runtime.prompting import compose_active_skill
 from skill_runtime.registry import SkillRegistry
@@ -43,8 +55,17 @@ _ROUTER_CONTEXT_MESSAGES = 6
 
 @dataclass(frozen=True)
 class SkillTurnResult:
+    """One turn's outcome plus how its skill decision evolved.
+
+    ``selection`` stays the router's decision, unchanged in meaning. ``final_skill``
+    is the skill active when the turn ended — the same as ``selection.skill_name``
+    unless the model activated something mid-turn (SPEC-018).
+    """
+
     outcome: AgentTurnOutcome
     selection: SkillSelection
+    final_skill: str | None = None
+    activations: int = 0
 
 
 class SkillTurnOrchestrator:
@@ -71,6 +92,10 @@ class SkillTurnOrchestrator:
         on_selection: Callable[[SkillSelection], None] = lambda _selection: None,
         on_turn_context: Callable[[TurnContext], None] = lambda _context: None,
         redacted_argument_tools: frozenset[str] = frozenset(),
+        max_skill_activations: int = MAX_SKILL_ACTIVATIONS_PER_TURN,
+        on_activation: Callable[[SkillSpec, str | None], None] = (
+            lambda _spec, _replaced: None
+        ),
     ) -> None:
         self._skill_registry = skill_registry
         self._router = router
@@ -92,6 +117,13 @@ class SkillTurnOrchestrator:
         self._on_selection = on_selection
         self._on_turn_context = on_turn_context
         self._redacted_argument_tools = redacted_argument_tools
+        self._max_skill_activations = max_skill_activations
+        self._on_activation = on_activation
+        # The registry is frozen at startup, so the declaration is built once.
+        # None when there is no skill to activate (SPEC-018 §4.2).
+        self._activate_declaration = build_activate_skill_declaration(
+            skill_registry.catalog()
+        )
 
     def run_turn(self, conversation: Conversation) -> SkillTurnResult:
         turn_id = self._id_factory()
@@ -126,6 +158,64 @@ class SkillTurnOrchestrator:
             return self._run_without_skill(conversation, context, selection)
         return self._run_with_skill(conversation, context, selection)
 
+    def _activation_handler(
+        self, context: TurnContext, initial_skill: SkillSpec | None
+    ) -> SkillActivationHandler | None:
+        """A fresh handler for this turn, or ``None`` when there is no catalog.
+
+        Per turn, because everything it holds — which skill is active, how many
+        activations are spent — is turn state that must never leak into the next
+        one (SPEC-018 §4.10).
+        """
+
+        if self._activate_declaration is None:
+            return None
+        return SkillActivationHandler(
+            skill_registry=self._skill_registry,
+            tool_registry=self._tool_registry,
+            # The original global executor: a mid-turn activation wraps this,
+            # never a restricted wrapper already in play.
+            executor=self._executor,
+            declaration=self._activate_declaration,
+            max_activations=self._max_skill_activations,
+            run_id=self._run_id,
+            turn_id=context.turn_id,
+            initial_skill=initial_skill,
+            trace=self._trace,
+            on_activation=self._on_activation,
+        )
+
+    def _turn_fields(
+        self, handler: SkillActivationHandler | None, initial_skill: str | None
+    ) -> Callable[[], dict[str, Any]]:
+        """The skill fields ``turn_finished`` reports, read when the turn ends.
+
+        ``selected_skill`` means "the skill active when the turn ended"; the
+        router's own choice is preserved as ``initial_skill``, and every turn
+        reports how many times the skill changed (SPEC-018 §4.9).
+        """
+
+        if handler is None:
+            return lambda: {
+                "initial_skill": initial_skill,
+                "skill_activations": 0,
+            }
+        return lambda: {
+            "selected_skill": handler.active_skill,
+            "skill_version": handler.active_skill_version,
+            "initial_skill": handler.initial_skill,
+            "skill_activations": handler.activations,
+        }
+
+    def _with_activate_skill(
+        self, tools: Sequence[dict[str, Any]]
+    ) -> tuple[dict[str, Any], ...]:
+        """Append the host's activation declaration, when there is one."""
+
+        if self._activate_declaration is None:
+            return tuple(tools)
+        return (*tools, self._activate_declaration)
+
     def _run_without_skill(
         self,
         conversation: Conversation,
@@ -133,14 +223,27 @@ class SkillTurnOrchestrator:
         selection: SkillSelection,
     ) -> SkillTurnResult:
         self._on_selection(selection)
-        runner = self._build_runner(self._default_tools, self._executor)
+        handler = self._activation_handler(context, None)
+        # The global executor is unrestricted here; `activate_skill` never
+        # reaches it, because the loop dispatches a control tool to the handler.
+        runner = self._build_runner(
+            self._with_activate_skill(self._default_tools),
+            self._executor,
+            control_handler=handler,
+            extra_turn_fields=self._turn_fields(handler, None),
+        )
         outcome = runner.run_turn(
             conversation.messages_for_model(),
             turn_context=context,
             selected_skill=None,
             routing_model_requests=selection.routing_requests,
         )
-        return SkillTurnResult(outcome, selection)
+        return SkillTurnResult(
+            outcome,
+            selection,
+            final_skill=handler.active_skill if handler else None,
+            activations=handler.activations if handler else 0,
+        )
 
     def _run_with_skill(
         self,
@@ -173,7 +276,9 @@ class SkillTurnOrchestrator:
                 allowed_tools=list(spec.allowed_tools),
             )
         )
-        tools = declarations_for_names(self._tool_registry, spec.allowed_tools)
+        tools = self._with_activate_skill(
+            declarations_for_names(self._tool_registry, spec.allowed_tools)
+        )
         self._trace.emit(
             build_event(
                 "skill_toolset_resolved",
@@ -183,23 +288,45 @@ class SkillTurnOrchestrator:
                 available_tools=[t["function"]["name"] for t in tools],
             )
         )
+        # The reserved name joins the allowlist so the executor agrees with the
+        # declarations, even though the loop intercepts the call before dispatch.
         restricted = RestrictedToolExecutor(
-            self._executor, frozenset(spec.allowed_tools), skill=spec.name
+            self._executor,
+            frozenset(spec.allowed_tools) | {ACTIVATE_SKILL_TOOL_NAME},
+            skill=spec.name,
         )
-        runner = self._build_runner(tools, restricted)
+        handler = self._activation_handler(context, spec)
+        runner = self._build_runner(
+            tools,
+            restricted,
+            control_handler=handler,
+            extra_turn_fields=self._turn_fields(handler, spec.name),
+        )
         outcome = runner.run_turn(
-            conversation.messages_for_model(
-                additional_system=compose_active_skill(spec)
-            ),
+            # The active-skill block is passed separately rather than baked into
+            # the system message, so an activation can replace it mid-turn
+            # without the loop having to tell base prompt and skill block apart.
+            conversation.messages_for_model(),
             turn_context=context,
             selected_skill=spec.name,
             skill_version=spec.version,
             routing_model_requests=selection.routing_requests,
+            system_suffix=compose_active_skill(spec),
         )
-        return SkillTurnResult(outcome, selection)
+        return SkillTurnResult(
+            outcome,
+            selection,
+            final_skill=handler.active_skill if handler else spec.name,
+            activations=handler.activations if handler else 0,
+        )
 
     def _build_runner(
-        self, tools: Sequence[dict[str, Any]], executor: Any
+        self,
+        tools: Sequence[dict[str, Any]],
+        executor: Any,
+        *,
+        control_handler: ControlToolHandler | None = None,
+        extra_turn_fields: Callable[[], dict[str, Any]] = lambda: {},
     ) -> AgentRunner:
         return AgentRunner(
             respond=self._respond,
@@ -217,6 +344,8 @@ class SkillTurnOrchestrator:
             id_factory=self._id_factory,
             payload_preview_chars=self._payload_preview_chars,
             redacted_argument_tools=self._redacted_argument_tools,
+            control_handler=control_handler,
+            extra_turn_fields=extra_turn_fields,
         )
 
     def _routing_failure(
@@ -261,6 +390,8 @@ class SkillTurnOrchestrator:
                 agent_model_requests=0,
                 selected_skill=None,
                 skill_version=None,
+                initial_skill=None,
+                skill_activations=0,
                 final_text_chars=0,
                 duration_ms=outcome.duration_ms,
             )

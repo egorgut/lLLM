@@ -170,6 +170,15 @@ MAX_SKILL_SCHEMA_BYTES = 100_000
 MAX_SKILLS = 100
 MAX_SKILL_DESCRIPTION_CHARS = 200
 
+# Mid-turn skill activation (SPEC-018). How many times one turn may swap its
+# active skill through the host-owned `activate_skill` tool; the router's own
+# initial selection does not count against it. This is a second, independent
+# bound: an activation *also* consumes one of MAX_TOOL_CALLS_PER_TURN above,
+# because it is a model decision that cost a model request, and hiding it from
+# that budget would let a thrashing model run unbounded. Exceeding this limit is
+# recoverable — the turn continues under the skill already active.
+MAX_SKILL_ACTIVATIONS_PER_TURN = 2
+
 # Isolated sandbox runtime (SPEC-015). The runtime itself owns every execution
 # rule below; SPEC-016 added the model-facing boundary on top of it (see the
 # SANDBOX_TOOL_* block after this one) without changing a single limit here.
