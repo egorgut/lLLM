@@ -160,3 +160,10 @@ rather than resolved from a constant at import time.
   question rather than an architectural one.
 - Whether qwen3's thinking tokens should be bounded or disabled for routing:
   ~11 s of the 32B routing latency produced 27 characters of answer.
+
+## Patches
+
+- `PATCH-017-01` — a third profile, `mid` (`qwen3:14b`), between `fast` and
+  `deep`. Confirms that adding a model costs one dictionary entry and nothing
+  else; its deadlines are interpolated rather than measured.
+  See [`docs/journal/patches/PATCH-017-01-mid-model-profile.md`](patches/PATCH-017-01-mid-model-profile.md).
