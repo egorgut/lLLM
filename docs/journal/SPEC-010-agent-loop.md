@@ -292,8 +292,8 @@ terminal UI, and no unrelated CLI cleanup.
 - **Patch:** [PATCH-010-02](../../patches/SPEC-010/PATCH-010-02-Readable-Tool-Result-Display.md)
 - **Date:** 2026-08-12
 - **Branch:** patch/PATCH-010-02-readable-tool-result-display
-- **Implementation commit:** `<pending>`
-- **Merge commit:** `<pending>`
+- **Implementation commit:** `0a6de1d`
+- **Merge commit:** `cc65a0e`
 
 #### Reason
 
