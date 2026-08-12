@@ -4,7 +4,8 @@
 - **Parent spec:** [SPEC-017](../../../specs/SPEC-017-Model-Profiles.md)
 - **Date:** 2026-08-12
 - **Branch:** patch/PATCH-017-01-mid-model-profile
-- **Merge commit:** <short-sha>
+- **Implementation commit:** `ebe934a`
+- **Merge commit:** `d3ed8e3`
 
 ## Hypothesis / intent
 
