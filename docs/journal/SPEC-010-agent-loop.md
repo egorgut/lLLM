@@ -286,3 +286,137 @@ tool *execution* (restarted after `[args]`), because that stretch is silent too
 and a sandbox call can hold it for a while. Scope stayed inside the patch — no
 new dependency, no configuration, no percentages/ETA/telemetry, no colors or
 terminal UI, and no unrelated CLI cleanup.
+
+### PATCH-010-02 — Readable Tool Result Display
+
+- **Patch:** [PATCH-010-02](../../patches/SPEC-010/PATCH-010-02-Readable-Tool-Result-Display.md)
+- **Date:** 2026-08-12
+- **Branch:** patch/PATCH-010-02-readable-tool-result-display
+- **Implementation commit:** `<pending>`
+- **Merge commit:** `<pending>`
+
+#### Reason
+
+PATCH-010-01 above made the *silence* between the durable lines legible. This
+patch makes one of those durable lines legible: `[result]`.
+
+`CliRenderer.tool_result` printed the whole result dict as a single
+`json.dumps` line, with nothing bounding it for the screen. The only cap in the
+path, `MCP_RESULT_MAX_CHARS = 20_000`, is a *model context* budget applied in
+`mcp_integration/adapter.py::_bounded_data`, so one MCP call could emit 20 000
+characters as one soft-wrapped line. MCP suffered most, because
+`normalize_result` nests the interesting part one level down under `data` inside
+an envelope that is itself on that line.
+
+The clearest evidence was in this repository: every large transcript committed
+to `README.md` had been hand-elided with `{...}`, `...`, or manual line breaks.
+The documentation was editing around a display defect, which also meant those
+transcripts were no longer faithful captures.
+
+#### Change
+
+Presentation only. No agent policy, prompt, tool contract, transport, tracing,
+persistence, or model change — and specifically no change to what the model
+receives: the renderer and `tool_result_message` are two independent calls on
+the same dict (`agent.py`), and only the first one was touched.
+
+- `tool_render.py` (new): pure functions, no state and no I/O.
+  `format_tool_result` recognises the payload's shape and renders a status
+  header plus a bounded indented body — an error envelope becomes one
+  `error · <type>: <message>` line; `columns`+`rows` becomes an aligned table
+  with numeric columns right-aligned; the MCP text fallback (`{"text": …}`)
+  becomes a wrapped text block; a dict of scalars becomes aligned key/value
+  pairs; anything else falls back to indented JSON. A nested value is kept on a
+  field line only if it fits whole — clipping `{"a": 1, "b":…` would hide the
+  one thing a structure is read for, so such a payload goes to the JSON branch
+  instead. `format_tool_args` renders `[args]` as a bounded `key=value` list.
+- The MCP envelope's `server/tool` appears in the header
+  (`ok · tracker/issue_get`); a local tool's does not, because
+  `[tool N/M] <name>` is already the line above.
+- The size note (`1.4 KB`) is printed only when something was actually left
+  out. When the whole payload is on screen its byte count tells the reader
+  nothing they cannot see.
+- `config.py`: `TOOL_DISPLAY_WIDTH = 100` and `TOOL_RESULT_PREVIEW_LINES = 16`,
+  documented next to `MCP_RESULT_MAX_CHARS` as the different concern they are —
+  that one bounds what the *model* receives, these bound only the screen. No
+  new configuration semantics, which is what kept this a PATCH rather than a
+  SPEC.
+- The width is a constant rather than `shutil.get_terminal_size()`, and there is
+  no `isatty` branch: the rendering is identical on a TTY and through a pipe,
+  the same rule `cli_activity.py` follows, so committed transcripts stay
+  reproducible.
+- `app.py`: `CliRenderer` calls the two formatters; the indicator lifecycle from
+  PATCH-010-01 is untouched. `import json` became unused and was removed.
+- The `agent.Renderer` protocol is unchanged, so `RecordingRenderer` and
+  `evals/runner.py` needed no edits.
+
+#### Verification
+
+- `python -m pytest tests/test_tool_render.py -q` — 44 passed. New file covers
+  every shape branch, both header forms, the omission footers and their
+  singular/plural, the `truncated`/`preview` envelope, `[args]` rendering, and
+  the edge cases a renderer must survive rather than raise on: an empty payload,
+  a non-dict result, an error value that is not a dict, a row shorter than its
+  header, rows that are not sequences, a 500-character cell, and a newline
+  inside a value. A final group asserts the invariants across all branches at
+  once — no line wider than `TOOL_DISPLAY_WIDTH`, no body past the budget, no
+  `\r`/ESC/`\n` inside a line, no trailing whitespace, and no mutation of the
+  dict that also goes to the model.
+- `python -m pytest -q` — 636 passed, 29 skipped.
+- Three assertions in `tests/test_cli_activity.py` pinned the old raw-JSON lines
+  and were updated to the new rendering. They test the indicator lifecycle, not
+  the format; the interleaving they assert is unchanged. One test name was
+  corrected with them: `test_default_renderer_output_is_unchanged` had meant
+  "no indicator markers when no indicator is injected", which its new name now
+  says.
+- Live, qwen3:8b (`fast` profile, digest `500a1f067a9f`, Q4_K_M, 8.2B, ctx
+  40960, Ollama defaults for sampling — the project sets no options), scripted
+  on stdin against `python app.py`. Exercised live: `python_calculate` (field
+  pair), `sql_query` at 1, 5, and 30 rows, and `mcp_time__get_current_time`
+  (MCP envelope with the server in the header). The 30-row case is the one
+  worth recording, since it shows every bound at once — 14 rows shown of 30, the
+  `Name` column capped at 32 characters, `Milliseconds` right-aligned, and NULL
+  composers rendered blank:
+
+```text
+[tool 1/4] sql_query
+[args] query=SELECT Name, Composer, Milliseconds FROM Track ORDER BY Milliseconds DESC LIMIT 30;
+[result] ok · 30 rows
+  Name                              Composer  Milliseconds
+  --------------------------------  --------  ------------
+  Occupation / Precipice                           5286953
+  Through a Looking Glass                          5088838
+  Greetings from Earth, Pt. 1                      2960293
+  …
+  The Gun On Ice Planet Zero, Pt.…                 2924341
+  … 16 more rows
+```
+
+  Incidentally confirming the display/model split: the model's answer described
+  the missing composers as "marked as `NULL`", which is the raw JSON it received
+  — not the blank cells the screen showed.
+- The error branch could not be captured live. Three attempts to provoke a real
+  tool error (an invented IANA timezone twice, a query against a non-existent
+  column) were all refused by the model *before* it called the tool, which is
+  correct behaviour on its part. The branch is covered by unit tests instead,
+  and the `invalid_query` transcript in `README.md` was reformatted by hand
+  rather than re-captured — as was the Tracker `issue_get` transcript, whose
+  payload was already illustrative (`{...}`) in the original.
+- No live *model-behavior* verification is required by `patches/README.md`: the
+  patch does not touch agent decisions, prompts, tool selection, history,
+  termination, or model-visible tool results. The live runs above exist to
+  produce honest transcripts, not to judge model behaviour.
+
+#### Outcome
+
+All acceptance criteria met. `README.md` was updated: every committed transcript
+now shows real rendered output instead of hand-elided JSON, a new subsection
+documents the shapes and the two constants, and `tool_render.py` was added to
+the structure table. The historical transcripts inside PATCH-010-01's entry
+above were deliberately left in the old format — they record what that run
+actually printed.
+
+Scope stayed inside the patch: no new dependency, no configuration switch, no
+colour or ANSI, and MCP `image`/`resource` content blocks — still dropped in
+`adapter.py::_join_text` — were left alone, since supporting them would change
+what the model receives and belongs in its own SPEC.

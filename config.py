@@ -134,6 +134,17 @@ TRACKER_MAX_SEARCH_PAGE_SIZE = 50
 # request asked for fewer records or fields.
 MCP_RESULT_MAX_CHARS = 20_000
 
+# Terminal rendering of a tool call and its result (PATCH-010-02, tool_render.py).
+# A different concern from MCP_RESULT_MAX_CHARS above: that one is the model's
+# context budget and bounds what the tool returns, these bound only what the
+# screen shows. The width is a constant rather than the real terminal size on
+# purpose -- the rendering must be identical on a TTY and through a pipe, so the
+# CLI transcripts committed to README.md stay reproducible.
+TOOL_DISPLAY_WIDTH = 100
+# Enough that the largest routine local result -- a sandbox_execute run with one
+# published artifact -- still fits whole, while anything unbounded gets cut.
+TOOL_RESULT_PREVIEW_LINES = 16
+
 # Local Chinook SQLite database (SPEC-008). Resolved relative to this file so the
 # paths hold regardless of the current working directory. The seed script is the
 # trusted source under version control; the runtime database is generated from it
