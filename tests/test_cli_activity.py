@@ -286,15 +286,16 @@ class TestRendererLifecycle:
         assert capsys.readouterr().out == (
             "<stop>\n"
             "\n[tool 1/4] sql_query\n"
-            '[args] {"query": "SELECT 1"}\n'
+            "[args] query=SELECT 1\n"
             "<start>\n"
             "<stop>\n"
-            '[result] {"ok": true}\n'
+            "[result] ok\n"
             "<start>\n"
         )
 
-    def test_default_renderer_output_is_unchanged(self, capsys):
-        # No indicator injected: byte-for-byte the pre-patch rendering.
+    def test_default_renderer_prints_no_markers_of_its_own(self, capsys):
+        # No indicator injected: nothing but the rendering itself, with no
+        # control characters anywhere in it.
         renderer = CliRenderer()
 
         renderer.tool_call(make_tool_call("sql_query", {"query": "SELECT 1"}), 1, 4)
@@ -303,8 +304,8 @@ class TestRendererLifecycle:
 
         assert capsys.readouterr().out == (
             "\n[tool 1/4] sql_query\n"
-            '[args] {"query": "SELECT 1"}\n'
-            '[result] {"ok": true}\n'
+            "[args] query=SELECT 1\n"
+            "[result] ok\n"
             "\nQwen: Rock."
         )
 
@@ -347,18 +348,20 @@ class TestMultiToolTurn:
             "<stop>",
             "",
             "[tool 1/4] python_calculate",
-            '[args] {"expression": "1+1"}',
+            "[args] expression=1+1",
             "<start>",  # tool execution
             "<stop>",
-            '[result] {"ok": true, "result": 4}',
+            "[result] ok",
+            "  result  4",
             "<start>",  # the model's next decision
             "<stop>",
             "",
             "[tool 2/4] python_calculate",
-            '[args] {"expression": "2+2"}',
+            "[args] expression=2+2",
             "<start>",
             "<stop>",
-            '[result] {"ok": true, "result": 4}',
+            "[result] ok",
+            "  result  4",
             "<start>",
             "<stop>",
             "",

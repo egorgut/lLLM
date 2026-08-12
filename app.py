@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import time
 from pathlib import Path
@@ -54,6 +53,7 @@ from skill_runtime import (
 )
 from skill_runtime.models import SkillSelection
 from storage import JsonConversationStore
+from tool_render import format_tool_args, format_tool_result
 from tools import (
     PYTHON_CALCULATE_SPEC,
     SQL_QUERY_SPEC,
@@ -197,13 +197,16 @@ class CliRenderer:
     def tool_call(self, call: ModelToolCall, used: int, maximum: int) -> None:
         self._indicator.stop()
         print(f"\n[tool {used}/{maximum}] {call.name}")
-        print(f"[args] {json.dumps(call.arguments, ensure_ascii=False)}")
+        print(format_tool_args(call.arguments))
         # Executing the tool is silent too, and a sandbox call can take a while.
         self._indicator.start()
 
     def tool_result(self, result: dict) -> None:
         self._indicator.stop()
-        print(f"[result] {json.dumps(result, ensure_ascii=False)}")
+        # Shape-aware and bounded (PATCH-010-02, tool_render.py). Only the
+        # display changes: agent.py sends the model the same serialized dict.
+        for line in format_tool_result(result):
+            print(line)
         # The model's next decision follows, with nothing to show until it lands.
         self._indicator.start()
 

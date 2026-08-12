@@ -91,8 +91,9 @@ app.py`, и возвращает результат модели для фина
 You: What is 173 multiplied by 284?
 
 [tool 1/4] python_calculate
-[args] {"expression": "173 * 284"}
-[result] {"ok": true, "result": 49132}
+[args] expression=173 * 284
+[result] ok
+  result  49132
 
 Qwen: The result of 173 multiplied by 284 is 49,132.
 ```
@@ -130,8 +131,15 @@ python scripts/init_database.py --force   # пересоздать сущест�
 You: Which five genres generated the most revenue?
 
 [tool 1/4] sql_query
-[args] {"query": "SELECT g.Name, SUM(il.UnitPrice * il.Quantity) AS Revenue FROM InvoiceLine il JOIN Track t ON il.TrackId = t.TrackId JOIN Genre g ON t.GenreId = g.GenreId GROUP BY g.Name ORDER BY Revenue DESC LIMIT 5"}
-[result] {"ok": true, "columns": ["Name", "Revenue"], "rows": [["Rock", 826.65], ...], "row_count": 5, "truncated": false}
+[args] query=SELECT g.Name, SUM(il.UnitPrice * il.Quantity) AS Revenue FROM InvoiceLine il JOIN Tra…
+[result] ok · 5 rows
+  Name                Revenue
+  ------------------  -------
+  Rock                 826.65
+  Latin                382.14
+  Metal                261.36
+  Alternative & Punk   241.56
+  TV Shows              93.53
 
 Qwen: The five genres that generated the most revenue are Rock ($826.65)...
 ```
@@ -168,13 +176,15 @@ pip install -r requirements.txt   # ставит официальный SDK: mcp
 Пример вызова в CLI:
 
 ```text
-You: What time is it now in UTC?
+You: What time is it in UTC right now?
 
 [tool 1/4] mcp_time__get_current_time
-[args] {"timezone": "UTC"}
-[result] {"ok": true, "server": "time", "tool": "get_current_time", "data": {"timezone": "UTC", "datetime": "2026-07-23T11:29:29+00:00"}}
+[args] timezone=UTC
+[result] ok · time/get_current_time
+  timezone  UTC
+  datetime  2026-08-12T08:49:54+00:00
 
-Qwen: The current time in UTC is 11:29 on July 23, 2026.
+Qwen: The current time in UTC is 08:49:54 on August 12, 2026.
 ```
 
 Сервер использует только стандартную библиотеку (`datetime` + `zoneinfo`), без
@@ -285,8 +295,14 @@ You: Use the tracker_read skill and show me issue DATA-142.
 [skill] tracker_read
 
 [tool 1/4] mcp_tracker__issue_get
-[args] {"issue_id": "DATA-142", "include_description": true}
-[result] {"ok": true, "server": "tracker", "tool": "issue_get", "data": {...}}
+[args] issue_id=DATA-142, include_description=true
+[result] ok · tracker/issue_get
+  key        DATA-142
+  summary    Add ownership metadata to the reporting mart
+  status     In Progress
+  assignee   a.petrov
+  queue      DATA
+  updatedAt  2026-07-21T16:02:11.000+0000
 
 Qwen: DATA-142 — Add ownership metadata to the reporting mart. Status: In Progress.
 ```
@@ -349,12 +365,15 @@ python -m evals.runner --suite live --category tracker
 You: Which music genre generated the most revenue, and what percentage of all revenue did it generate?
 
 [tool 1/4] sql_query
-[args] {"query": "SELECT g.Name AS GenreName, SUM(il.UnitPrice * il.Quantity) AS TotalRevenue, (SUM(il.UnitPrice * il.Quantity) / (SELECT SUM(UnitPrice * Quantity) FROM InvoiceLine JOIN Track ON ...)) * 100 AS Percentage FROM ... LIMIT 1"}
-[result] {"ok": false, "error": {"type": "invalid_query", "message": "The SQL query is invalid."}}
+[args] query=SELECT g.Name AS GenreName, SUM(il.UnitPrice * il.Quantity) AS TotalRevenue, (SUM(il.U…
+[result] error · invalid_query: The SQL query is invalid.
 
 [tool 2/4] sql_query
-[args] {"query": "SELECT g.Name AS GenreName, SUM(il.UnitPrice * il.Quantity) AS TotalRevenue, (SUM(il.UnitPrice * il.Quantity) / (SELECT SUM(UnitPrice * Quantity) FROM InvoiceLine) * 100) AS Percentage FROM InvoiceLine il JOIN Track t ON il.TrackId = t.TrackId JOIN Genre g ON t.GenreId = g.GenreId GROUP BY g.GenreId ORDER BY TotalRevenue DESC LIMIT 1"}
-[result] {"ok": true, "columns": ["GenreName", "TotalRevenue", "Percentage"], "rows": [["Rock", 826.65, 35.499871167224946]], "row_count": 1, "truncated": false}
+[args] query=SELECT g.Name AS GenreName, SUM(il.UnitPrice * il.Quantity) AS TotalRevenue, (SUM(il.U…
+[result] ok · 1 row
+  GenreName  TotalRevenue  Percentage
+  ---------  ------------  ------------------
+  Rock             826.65  35.499871167224946
 
 Qwen: The genre that generated the most revenue is Rock ($826.65), about 35.5% of all revenue.
 ```
@@ -384,6 +403,33 @@ Qwen: The genre that generated the most revenue is Rock ($826.65), about 35.5% o
 транспорт модели, агентный цикл и инструменты о нём не знают. Если stdout **не**
 терминал (пайп, редирект, тесты, evals), не выводится ни одного байта — поэтому
 все транскрипты в этом README и в журналах воспроизводятся без изменений.
+
+### Отображение результатов инструментов (PATCH-010-02)
+
+Раньше результат вызова печатался одной строкой `json.dumps` без всякого предела
+для экрана: единственный предел в этом пути, `MCP_RESULT_MAX_CHARS`, — это
+бюджет **контекста модели**, так что один MCP-вызов мог выдать в терминал 20 000
+символов одной строкой. Теперь `tool_render.py` разбирает форму полезной
+нагрузки и печатает строку-статус плюс ограниченное тело с отступом:
+
+| Форма | Как выводится |
+| --- | --- |
+| `{"ok": false, "error": {...}}` | одна строка `error · <тип>: <сообщение>` |
+| `columns` + `rows` | выровненная таблица, числовые колонки по правому краю |
+| `{"text": ...}` (текстовый fallback MCP) | текстовый блок с переносом по ширине |
+| словарь скаляров | выровненные пары `ключ значение` |
+| всё остальное | JSON с отступами |
+
+Тело не длиннее `TOOL_RESULT_PREVIEW_LINES` строк, строка — не шире
+`TOOL_DISPLAY_WIDTH` (обе в `config.py`); что не поместилось, названо явно —
+`… 16 more rows`. Для MCP в заголовке видно, какой сервер ответил
+(`ok · tracker/issue_get`); для локального инструмента имя уже есть строкой выше.
+
+Это **только отображение**. Модели уходит ровно тот же сериализованный словарь,
+что и раньше: рендерер и `tool_result_message` (`agent.py`) — два независимых
+вызова на одном и том же результате. Ширина — константа, а не реальный размер
+терминала, и ни ANSI-последовательностей, ни `\r` не выводится, поэтому в TTY и
+в пайпе рендер одинаков, по тому же правилу, что и у индикатора выше.
 
 ## Надёжность и наблюдаемость хода (SPEC-011)
 
@@ -519,8 +565,11 @@ You: Which music genre generated the most revenue, and what percentage of total 
 [skill] sales_analysis
 
 [tool 1/4] sql_query
-[args] {"query": "WITH GenreRevenue AS (...) SELECT ... LIMIT 1;"}
-[result] {"ok": true, "rows": [["Rock", 826.65, 35.499...]], ...}
+[args] query=SELECT g.Name AS Genre, SUM(il.UnitPrice * il.Quantity) AS TotalRevenue, (SUM(il.UnitP…
+[result] ok · 1 row
+  Genre  TotalRevenue  Percentage
+  -----  ------------  ------------------
+  Rock         826.65  35.499871167224946
 
 Qwen: The music genre that generated the most revenue is Rock, contributing
 $826.65, which accounts for 35.5% of the total revenue. ...
@@ -641,11 +690,22 @@ You: Use the code_workspace skill to create a CSV file with the numbers 1
 [skill] code_workspace
 
 [tool 1/4] sandbox_execute
-[result] {"ok": true, "status": "succeeded", "exit_code": 0,
-          "stdout": "Created numbers_squares.csv\n", "stderr": "",
-          "artifacts": [{"name": "numbers_squares.csv", "media_type": "text/csv",
-                         "size_bytes": 42,
-                         "path": "data/artifacts/<run_id>/<turn_id>/numbers_squares.csv"}]}
+[args] code=import csv with open('/sandbox/output/numbers_squares.csv', 'w', newline='') as f: csv.…
+[result] ok
+  {
+    "status": "succeeded",
+    "exit_code": 0,
+    "stdout": "Created numbers_squares.csv\n",
+    "stderr": "",
+    "artifacts": [
+      {
+        "name": "numbers_squares.csv",
+        "media_type": "text/csv",
+        "size_bytes": 42,
+        "path": "data/artifacts/<run_id>/<turn_id>/numbers_squares.csv"
+      }
+    ]
+  }
 
 Qwen: Файл создан: data/artifacts/<run_id>/<turn_id>/numbers_squares.csv
 ```
@@ -804,6 +864,7 @@ SQLITE_DATABASE_PATH = ...  # сгенерированная база (в git н
 | `app.py`          | Точка входа: цикл CLI-чата, распознавание команд, откат и сохранение |
 | `agent.py`        | `AgentRunner` — ограниченный, наблюдаемый агентный цикл (модель → инструмент → модель) |
 | `cli_activity.py` | `ActivityIndicator` — транзиентный индикатор активности CLI на время молчаливых участков хода (только для TTY) |
+| `tool_render.py`  | Отображение вызова инструмента и его результата в терминале: разбор формы полезной нагрузки, ограниченное по ширине и высоте тело (PATCH-010-02) |
 | `reliability.py`  | `TurnStatus`/`TerminationReason`/`AgentTurnOutcome`, дедлайны (`run_with_deadline`), отпечаток вызова инструмента |
 | `tracing.py`      | Структурированная трассировка: `TraceSink`/`JsonlTraceSink`/`SafeTraceSink`, построение событий |
 | `conversation.py` | Класс `Conversation` — владелец истории диалога          |
