@@ -3,8 +3,8 @@
 - **Spec:** [SPEC-018](../../specs/SPEC-018-Mid-Turn-Skill-Activation.md)
 - **Date:** 2026-08-12
 - **Branch:** feature/SPEC-018-mid-turn-skill-activation
-- **Implementation commit:** `<pending>`
-- **Merge commit:** `<pending>`
+- **Implementation commit:** `ea682d2`
+- **Merge commit:** `9c3ca07`
 
 ## Hypothesis / intent
 
