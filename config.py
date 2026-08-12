@@ -28,6 +28,12 @@ MODEL_PROFILES = {
     # The project's original numbers, unchanged: every journal from SPEC-005
     # onwards was recorded under exactly this profile and stays reproducible.
     "fast": ModelProfile("fast", "qwen3:8b", 120, 180, 30),
+    # PATCH-017-01. Deadlines interpolated from the two measured profiles by
+    # parameter count (14.8B sits 0.27 of the way from 8.2B to 32.8B), not
+    # measured: ~5.7 s routing and ~20 s per tool-emitting decision, carrying
+    # the same headroom ratio as its neighbours. A live turn_timed_out here is
+    # a signal to remeasure, not a model verdict.
+    "mid": ModelProfile("mid", "qwen3:14b", 180, 300, 40),
     # Proposed from the measurements above with headroom for a four-call turn.
     "deep": ModelProfile("deep", "qwen3:32b", 300, 600, 60),
 }
