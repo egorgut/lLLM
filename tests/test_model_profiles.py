@@ -63,6 +63,13 @@ class TestCommittedProfiles:
         assert deep.agent_turn_timeout_seconds > fast.agent_turn_timeout_seconds
         assert deep.skill_routing_timeout_seconds > fast.skill_routing_timeout_seconds
 
+    def test_next_profile_runs_the_new_model_generation(self):
+        # PATCH-017-02 pins only what the patch actually claims: the model binds,
+        # and adding it did not move the host default (which every journal from
+        # SPEC-005 onwards depends on).
+        assert MODEL_PROFILES["next"].model == "qwen3.8:27b"
+        assert resolve_model_profile() is MODEL_PROFILES["fast"]
+
     def test_every_committed_profile_is_internally_coherent(self):
         # The same host-owned rules SPEC-011 §10 applies to one configuration.
         validate_model_profiles()

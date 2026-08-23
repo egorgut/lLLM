@@ -36,6 +36,15 @@ MODEL_PROFILES = {
     "mid": ModelProfile("mid", "qwen3:14b", 180, 300, 40),
     # Proposed from the measurements above with headroom for a four-call turn.
     "deep": ModelProfile("deep", "qwen3:32b", 300, 600, 60),
+    # PATCH-017-02. A different model generation (family `qwen35`, ctx 262144),
+    # so it is deliberately not slotted into the fast/mid/deep size scale: it is
+    # a candidate baseline, not a rung. Unlike `mid`, these deadlines are
+    # *measured* on this host, warm: routing 3.6-4.9 s, a tool-emitting decision
+    # 26-33 s, and one 65 s final answer -- faster to route than qwen3:32b and
+    # faster to decide, despite sitting between `mid` and `deep` by parameter
+    # count. Carrying the same ~2.5-3x margin the other profiles apply to a
+    # four-call turn (4.3 + 4x33 + 65 ~= 201 s) gives 500 s.
+    "next": ModelProfile("next", "qwen3.8:27b", 250, 500, 50),
 }
 DEFAULT_MODEL_PROFILE = "fast"
 
