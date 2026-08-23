@@ -167,3 +167,10 @@ rather than resolved from a constant at import time.
   `deep`. Confirms that adding a model costs one dictionary entry and nothing
   else; its deadlines are interpolated rather than measured.
   See [`docs/journal/patches/PATCH-017-01-mid-model-profile.md`](patches/PATCH-017-01-mid-model-profile.md).
+
+- `PATCH-017-02` — a fourth profile, `next` (`qwen3.8:27b`), from a different
+  model generation and deliberately outside the fast/mid/deep size scale. Its
+  deadlines are **measured**, not interpolated, and the measurement inverted the
+  size assumption: at 27.3B it routes like the 8B model and decides faster than
+  the 32.8B one.
+  See [`docs/journal/patches/PATCH-017-02-next-model-profile.md`](patches/PATCH-017-02-next-model-profile.md).
