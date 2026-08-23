@@ -4,8 +4,8 @@
 - **Parent spec:** [SPEC-012](../../../specs/SPEC-012-Skills.md)
 - **Date:** 2026-08-23
 - **Branch:** patch/PATCH-012-01-bound-skill-routing-generation
-- **Implementation commit:** `PENDING`
-- **Merge commit:** `PENDING`
+- **Implementation commit:** `af7e4c9`
+- **Merge commit:** `83aca80`
 
 ## Hypothesis / intent
 
