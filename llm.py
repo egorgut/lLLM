@@ -7,6 +7,22 @@ from ollama import Client
 from config import OLLAMA_HOST, ModelProfile
 
 
+# The shape a skill-routing response must have (PATCH-012-01). This is the same
+# contract `SkillRouter._parse` validates -- an object with an exact catalog name
+# in `skill`, or null when no skill applies -- restated for the model as a schema
+# the server constrains generation to. Keep the two in step: `_parse` remains
+# authoritative, because the schema cannot express "an exact name from *this*
+# turn's catalog", and a response still has to survive it.
+ROUTING_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "skill": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["skill", "reason"],
+}
+
+
 @dataclass(frozen=True)
 class ModelToolCall:
     """A tool call requested by the model, in harness-level terms.
@@ -54,13 +70,57 @@ class OllamaModel:
         self,
         messages: list[dict[str, Any]],
         tools: Sequence[dict[str, Any]] | None = None,
+        *,
+        think: bool | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> "ModelResponse":
-        return ModelResponse(messages, tools, model=self.model, client=self._client)
+        # Both extras are keyword-only and default to None -- the SDK's own
+        # defaults, meaning "the model decides" and "unconstrained" -- so the
+        # `Respond` callable AgentRunner holds is unchanged in both signature and
+        # behavior. Only `text()` sets them (PATCH-012-01).
+        return ModelResponse(
+            messages,
+            tools,
+            model=self.model,
+            client=self._client,
+            think=think,
+            response_format=response_format,
+        )
 
     def text(self, messages: list[dict[str, Any]]) -> str:
-        """One buffered, tool-less response — the shape skill routing needs."""
+        """One buffered, tool-less response — the shape skill routing needs.
 
-        return "".join(self.respond(messages).text_chunks())
+        Thinking is disabled here and only here (PATCH-012-01). Routing is a
+        narrow classification — "which one skill, if any, best matches this
+        request?" (SPEC-012 §"Core architectural decisions" 5) — and on a
+        multi-intent request the models spent an unbounded amount of wall-clock
+        deliberating over it: measured on qwen3:8b, 59.6 s to emit a correct
+        172-character answer behind 14,819 characters of hidden reasoning, and a
+        diagnostic run that reached 14,760 tokens over 9m58s without finishing.
+        Nothing bounded that: `MAX_SKILL_ROUTING_RESPONSE_CHARS` is checked after
+        a response arrives, so it bounds what is accepted, never what is
+        generated, and the profile's routing deadline could only kill the turn.
+        Turning thinking off takes the same decision to 0.8 s on the same model.
+
+        The agent loop keeps its reasoning: `respond()` is untouched, and whether
+        deliberation earns its cost *there* is a separate question this does not
+        answer.
+
+        Generation is also constrained to `ROUTING_RESPONSE_SCHEMA`, because
+        turning thinking off exposed a second failure: qwen3:32b then wrapped its
+        JSON in a ```json fence on 5 of 6 runs, which `SkillRouter._parse`
+        rejects. The decision was correct every time -- only its packaging was
+        not -- but two fences in a row exhaust the single repair attempt and fail
+        the turn, and `skill-live-sales-001` failed exactly that way on `deep`.
+        Constraining the response fixed all 27 of 27 probe runs across the three
+        profiles, `null` selections included.
+        """
+
+        return "".join(
+            self.respond(
+                messages, think=False, response_format=ROUTING_RESPONSE_SCHEMA
+            ).text_chunks()
+        )
 
 
 class ModelResponse:
@@ -80,6 +140,8 @@ class ModelResponse:
         *,
         model: str,
         client: Client,
+        think: bool | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> None:
         if not messages:
             raise ValueError("Message history cannot be empty.")
@@ -90,6 +152,8 @@ class ModelResponse:
             messages=messages,
             tools=tools,
             stream=True,
+            think=think,
+            format=response_format,
         )
 
     def text_chunks(self) -> Iterator[str]:
