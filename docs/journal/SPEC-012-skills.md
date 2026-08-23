@@ -145,3 +145,12 @@ metric was absent. No SPEC-011 behavior regressed.
 - Routing uses the same `MODEL_NAME` as the agent; a dedicated smaller router
   model remains a future option (out of scope here).
 - Multiple skills, chaining, and per-user permissions stay non-goals (SPEC-012).
+
+## Patches
+
+- `PATCH-012-01` — bounds the routing request: thinking off, response shape
+  constrained. A multi-intent prompt used to drive the routing model past every
+  profile's deadline (59.6 s to emit a correct 172-character answer behind
+  14,819 characters of hidden reasoning); it now decides in about a second. The
+  deadlines turned out to be sound and were left alone.
+  See [`docs/journal/patches/PATCH-012-01-bound-skill-routing-generation.md`](patches/PATCH-012-01-bound-skill-routing-generation.md).
