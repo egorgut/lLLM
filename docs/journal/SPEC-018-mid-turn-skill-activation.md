@@ -459,3 +459,8 @@ The two substantive findings are both negative, and both are kept:
 2. Multi-intent prompts can drive the routing model past every profile's
    deadline, because nothing bounds its generation. This is the more urgent of
    the two, and it belongs to SPEC-012.
+
+#### Commits
+
+- Implementation: `c6acb0a` — Complete mid-turn skill activation verification (PATCH-018-01)
+- Merge (`--no-ff`): `c3a94dc` — Merge PATCH-018-01: complete skill activation verification
