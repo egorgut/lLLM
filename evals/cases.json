@@ -668,6 +668,276 @@
     }
   },
   {
+    "id": "skill-activation-none-001",
+    "category": "skill_activation_none",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Work out which genre earns the most revenue in the sales database.",
+    "route": [
+      "{\"skill\": null, \"reason\": \"phrased as an open request, no skill matched\"}"
+    ],
+    "script": [
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "sales_analysis"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "sql_query",
+          "arguments": {
+            "query": "SELECT g.Name, SUM(il.UnitPrice*il.Quantity) AS r FROM InvoiceLine il JOIN Track t ON il.TrackId=t.TrackId JOIN Genre g ON t.GenreId=g.GenreId GROUP BY g.Name ORDER BY r DESC LIMIT 1"
+          }
+        }
+      },
+      {
+        "text": "Rock generated the most revenue: $826.65. Basis: revenue = UnitPrice x Quantity grouped by genre. Limitation: local Chinook sample database."
+      }
+    ],
+    "tool_results": {
+      "sql_query": {
+        "ok": true,
+        "columns": [
+          "Name",
+          "r"
+        ],
+        "rows": [
+          [
+            "Rock",
+            826.65
+          ]
+        ],
+        "row_count": 1,
+        "truncated": false
+      }
+    },
+    "expectation": {
+      "expected_selection": null,
+      "selection_source": "model",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 1,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "sql_query"
+      ],
+      "forbidden_tools": [
+        "mcp_time__get_current_time",
+        "sandbox_execute"
+      ],
+      "answer_contains": [
+        "revenue"
+      ]
+    }
+  },
+  {
+    "id": "skill-activation-replace-001",
+    "category": "skill_activation_replace",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Read issue DATA-142, then answer the revenue question it asks about the sales database.",
+    "route": [
+      "{\"skill\": \"tracker_read\", \"reason\": \"the request starts at a tracker issue\"}"
+    ],
+    "script": [
+      {
+        "tool_call": {
+          "name": "mcp_tracker__issue_get",
+          "arguments": {
+            "issue_id": "DATA-142",
+            "include_description": true
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "sales_analysis"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "sql_query",
+          "arguments": {
+            "query": "SELECT g.Name, SUM(il.UnitPrice*il.Quantity) AS r FROM InvoiceLine il JOIN Track t ON il.TrackId=t.TrackId JOIN Genre g ON t.GenreId=g.GenreId GROUP BY g.Name ORDER BY r DESC LIMIT 1"
+          }
+        }
+      },
+      {
+        "text": "DATA-142 asks which genre earns the most revenue. Answer: Rock, at $826.65. Limitation: local Chinook sample database."
+      }
+    ],
+    "tool_results": {
+      "mcp_tracker__issue_get": {
+        "ok": true,
+        "server": "tracker",
+        "tool": "issue_get",
+        "data": {
+          "key": "DATA-142",
+          "summary": "Which genre earns the most revenue?",
+          "status": "Open"
+        }
+      },
+      "sql_query": {
+        "ok": true,
+        "columns": [
+          "Name",
+          "r"
+        ],
+        "rows": [
+          [
+            "Rock",
+            826.65
+          ]
+        ],
+        "row_count": 1,
+        "truncated": false
+      }
+    },
+    "expectation": {
+      "expected_selection": "tracker_read",
+      "selection_source": "model",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 1,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "mcp_tracker__issue_get",
+        "sql_query"
+      ],
+      "forbidden_tools": [
+        "mcp_time__get_current_time",
+        "sandbox_execute"
+      ],
+      "answer_contains": [
+        "Rock"
+      ]
+    }
+  },
+  {
+    "id": "skill-activation-unknown-001",
+    "category": "skill_activation_unknown",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Which genre earns the most revenue?",
+    "route": [
+      "{\"skill\": \"sales_analysis\", \"reason\": \"revenue analysis\"}"
+    ],
+    "script": [
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "revenue_expert"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "sql_query",
+          "arguments": {
+            "query": "SELECT g.Name, SUM(il.UnitPrice*il.Quantity) AS r FROM InvoiceLine il JOIN Track t ON il.TrackId=t.TrackId JOIN Genre g ON t.GenreId=g.GenreId GROUP BY g.Name ORDER BY r DESC LIMIT 1"
+          }
+        }
+      },
+      {
+        "text": "Rock generated the most revenue: $826.65. Limitation: local Chinook sample database."
+      }
+    ],
+    "tool_results": {
+      "sql_query": {
+        "ok": true,
+        "columns": [
+          "Name",
+          "r"
+        ],
+        "rows": [
+          [
+            "Rock",
+            826.65
+          ]
+        ],
+        "row_count": 1,
+        "truncated": false
+      }
+    },
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "selection_source": "model",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 0,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "sql_query"
+      ],
+      "answer_contains": [
+        "Rock"
+      ]
+    }
+  },
+  {
+    "id": "skill-activation-cap-001",
+    "category": "skill_activation_cap",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Look at the sales data, the tracker issues, and then write it all up in a file.",
+    "route": [
+      "{\"skill\": null, \"reason\": \"request spans several unrelated areas\"}"
+    ],
+    "script": [
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "sales_analysis"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "tracker_read"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "code_workspace"
+          }
+        }
+      },
+      {
+        "text": "I have reached the per-turn limit on switching procedures, so I will continue with tracker_read. Tell me which part you want first and I will do that one."
+      }
+    ],
+    "expectation": {
+      "expected_selection": null,
+      "selection_source": "model",
+      "expected_final_skill": "tracker_read",
+      "expected_activations": 2,
+      "status": "completed",
+      "reason": "final_answer",
+      "max_tool_calls": 0
+    }
+  },
+  {
     "id": "tracker-issue-lookup-001",
     "category": "tracker_issue_lookup",
     "modes": [
@@ -1786,6 +2056,118 @@
       "answer_contains": [
         "earlier turn",
         "55"
+      ]
+    }
+  },
+  {
+    "id": "skill-live-none-001",
+    "category": "skill_live_none",
+    "modes": [
+      "live"
+    ],
+    "skill_case": true,
+    "prompt": "In one sentence, what is a bounded agent loop?",
+    "expectation": {
+      "expected_selection": null,
+      "expected_final_skill": null,
+      "expected_activations": 0,
+      "status": "completed",
+      "reason": "final_answer",
+      "max_tool_calls": 0
+    }
+  },
+  {
+    "id": "skill-live-sales-001",
+    "category": "skill_live_sales",
+    "modes": [
+      "live"
+    ],
+    "skill_case": true,
+    "prompt": "Using the sales database, tell me which genre earns the most revenue.",
+    "expectation": {
+      "expected_selection": "sales_analysis",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 0,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "sql_query"
+      ]
+    }
+  },
+  {
+    "id": "skill-live-tracker-001",
+    "category": "skill_live_tracker",
+    "modes": [
+      "live"
+    ],
+    "skill_case": true,
+    "prompt": "Look up issue {tracker_issue_id} in Yandex Tracker and summarise what it is about.",
+    "expectation": {
+      "expected_selection": "tracker_read",
+      "expected_final_skill": "tracker_read",
+      "expected_activations": 0,
+      "status": "completed",
+      "reason": "final_answer",
+      "min_tool_calls": 1
+    }
+  },
+  {
+    "id": "skill-live-cross-001",
+    "category": "skill_live_cross",
+    "modes": [
+      "live"
+    ],
+    "skill_case": true,
+    "prompt": "Look up issue {tracker_issue_id} in Yandex Tracker and summarise what it is about. Then, using the sales database, tell me which genre earns the most revenue.",
+    "expectation": {
+      "expected_selection": "tracker_read",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 1,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "sql_query"
+      ]
+    }
+  },
+  {
+    "id": "skill-live-cross-explicit-001",
+    "category": "skill_live_cross_explicit",
+    "modes": [
+      "live"
+    ],
+    "skill_case": true,
+    "prompt": "Use the tracker_read skill to look up issue {tracker_issue_id} in Yandex Tracker and summarise what it is about. Then, using the sales database, tell me which genre earns the most revenue.",
+    "expectation": {
+      "expected_selection": "tracker_read",
+      "selection_source": "explicit",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 1,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "sql_query"
+      ]
+    }
+  },
+  {
+    "id": "skill-live-activation-forced-001",
+    "category": "skill_live_activation_forced",
+    "modes": [
+      "live"
+    ],
+    "skill_case": true,
+    "prompt": "Use the tracker_read skill. First look up issue {tracker_issue_id} in Yandex Tracker and summarise it. Then call the activate_skill tool with skill \"sales_analysis\" to switch skills, and use the sales database to tell me which genre earns the most revenue.",
+    "expectation": {
+      "expected_selection": "tracker_read",
+      "selection_source": "explicit",
+      "expected_final_skill": "sales_analysis",
+      "expected_activations": 1,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "sql_query"
       ]
     }
   }

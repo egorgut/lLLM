@@ -1,0 +1,338 @@
+"""Control-tool seam tests (SPEC-018 §7.1 items 1, 2, 9; PATCH-018-01).
+
+These exercise `AgentRunner`'s *general* notion of a host-handled tool — a tool
+the loop must not dispatch to the `ToolExecutor`, because handling it changes the
+turn's own view. Nothing here imports `skill_runtime`: the loop is skill-agnostic
+by design (SPEC-018 §3.2), and these tests fail if that ever stops being true.
+
+`tests/test_skill_activation.py` covers the one real implementation of the seam.
+"""
+
+from typing import Any
+
+from agent import ControlResult
+from reliability import TerminationReason, TurnStatus
+from tests.support import (
+    FakeToolExecutor,
+    RecordingRenderer,
+    ScriptedModelResponse,
+    ScriptedResponder,
+    make_tool_call,
+)
+from tests.test_agent_runner import BASE_MESSAGES, make_runner
+
+CONTROL_TOOL = "control_tool"
+
+
+class RecordingControlHandler:
+    """A minimal `ControlToolHandler` double that records every invocation.
+
+    Returns a preset `ControlResult` per call (holding on the last one), so a
+    test can script "this activation replaces the view, that one reports a
+    recoverable error and changes nothing".
+    """
+
+    names = frozenset({CONTROL_TOOL})
+
+    def __init__(self, results: list[ControlResult] | None = None) -> None:
+        self._results = list(results) if results else []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handle(self, name: str, arguments: dict[str, Any]) -> ControlResult:
+        self.calls.append((name, dict(arguments)))
+        if not self._results:
+            return ControlResult(result={"ok": True})
+        if len(self._results) > 1:
+            return self._results.pop(0)
+        return self._results[0]
+
+
+def control_call(**arguments) -> Any:
+    return make_tool_call(CONTROL_TOOL, arguments)
+
+
+class TestControlDispatch:
+    """§7.1/1 — a control call bypasses the executor and is still transcribed."""
+
+    def test_handler_runs_instead_of_the_executor(self):
+        handler = RecordingControlHandler(
+            [ControlResult(result={"ok": True, "receipt": "yes"})]
+        )
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="x")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        executor = FakeToolExecutor()
+        runner = make_runner(responder, executor, control_handler=handler)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.COMPLETED
+        assert handler.calls == [(CONTROL_TOOL, {"name": "x"})]
+        # The ordinary dispatch path was never taken.
+        assert executor.calls == []
+
+    def test_control_result_is_appended_to_the_turn_transcript(self):
+        handler = RecordingControlHandler(
+            [ControlResult(result={"ok": True, "receipt": "yes"})]
+        )
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="x")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        runner.run_turn(BASE_MESSAGES)
+
+        # The second model request must see the control call and its result,
+        # exactly as it would for an ordinary tool.
+        second_request_messages, _tools = responder.calls[1]
+        assert second_request_messages[-2]["role"] == "assistant"
+        assert (
+            second_request_messages[-2]["tool_calls"][0]["function"]["name"]
+            == CONTROL_TOOL
+        )
+        assert second_request_messages[-1] == {
+            "role": "tool",
+            "tool_name": CONTROL_TOOL,
+            "content": '{"ok": true, "receipt": "yes"}',
+        }
+
+    def test_renderer_sees_the_control_call_and_result(self):
+        handler = RecordingControlHandler([ControlResult(result={"ok": True})])
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="x")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        renderer = RecordingRenderer()
+        runner = make_runner(responder, control_handler=handler, renderer=renderer)
+
+        runner.run_turn(BASE_MESSAGES)
+
+        assert renderer.tool_calls == [(CONTROL_TOOL, 1, 4)]
+        assert renderer.tool_results == [{"ok": True}]
+
+
+class TestPreDispatchPoliciesStillApply:
+    """§7.1/2 — every policy that precedes dispatch runs before the handler."""
+
+    def test_parallel_control_calls_are_rejected_before_the_handler(self):
+        handler = RecordingControlHandler()
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(
+                    tool_calls=[control_call(name="a"), control_call(name="b")]
+                )
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.STOPPED
+        assert outcome.reason is TerminationReason.PARALLEL_TOOL_CALLS
+        assert handler.calls == []
+
+    def test_repeated_identical_control_call_stops_before_the_handler(self):
+        handler = RecordingControlHandler()
+        responder = ScriptedResponder(
+            [ScriptedModelResponse(tool_calls=[control_call(name="a")])] * 3
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.STOPPED
+        assert outcome.reason is TerminationReason.REPEATED_TOOL_CALL
+        # max_identical_tool_calls=2: the third one never reaches the handler.
+        assert len(handler.calls) == 2
+
+    def test_tool_call_budget_stops_a_control_call(self):
+        handler = RecordingControlHandler()
+        # Distinct arguments each time, so the repetition guard never fires and
+        # the budget is the policy under test.
+        responder = ScriptedResponder(
+            [ScriptedModelResponse(tool_calls=[control_call(name=str(i))]) for i in range(4)]
+        )
+        runner = make_runner(responder, control_handler=handler, max_tool_calls=2)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.STOPPED
+        assert outcome.reason is TerminationReason.TOOL_CALL_LIMIT
+        assert len(handler.calls) == 2
+
+
+class TestControlCallsCountAgainstTheBudget:
+    """§7.1/9 — an activation is a model decision and is counted as one."""
+
+    def test_every_control_call_increments_tool_calls_executed(self):
+        handler = RecordingControlHandler()
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(tool_calls=[control_call(name="b")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.tool_calls_executed == 2
+
+    def test_control_and_ordinary_calls_share_one_budget(self):
+        handler = RecordingControlHandler()
+        call = make_tool_call("python_calculate", {"expression": "1+1"})
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        runner = make_runner(responder, executor, control_handler=handler)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.tool_calls_executed == 2
+        assert len(handler.calls) == 1
+        assert [name for name, _ in executor.calls] == ["python_calculate"]
+
+
+class TestViewReplacement:
+    """Each `ControlResult` field is independent; ``None`` means unchanged."""
+
+    def test_new_declarations_reach_the_next_model_request(self):
+        new_tools = ({"type": "function", "function": {"name": "sql_query"}},)
+        handler = RecordingControlHandler(
+            [ControlResult(result={"ok": True}, tools=new_tools)]
+        )
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        runner.run_turn(BASE_MESSAGES)
+
+        first_tools = responder.calls[0][1]
+        second_tools = responder.calls[1][1]
+        assert [t["function"]["name"] for t in first_tools] == ["python_calculate"]
+        assert [t["function"]["name"] for t in second_tools] == ["sql_query"]
+
+    def test_new_executor_receives_every_subsequent_call(self):
+        replacement = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        handler = RecordingControlHandler(
+            [ControlResult(result={"ok": True}, executor=replacement)]
+        )
+        call = make_tool_call("python_calculate", {"expression": "1+1"})
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        original = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        runner = make_runner(responder, original, control_handler=handler)
+
+        runner.run_turn(BASE_MESSAGES)
+
+        assert original.calls == []
+        assert [name for name, _ in replacement.calls] == ["python_calculate"]
+
+    def test_system_suffix_replaces_rather_than_stacks(self):
+        handler = RecordingControlHandler(
+            [
+                ControlResult(result={"ok": True}, system_suffix="FIRST"),
+                ControlResult(result={"ok": True}, system_suffix="SECOND"),
+            ]
+        )
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(tool_calls=[control_call(name="b")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        runner.run_turn(
+            [{"role": "system", "content": "BASE"}, {"role": "user", "content": "hi"}]
+        )
+
+        contents = [messages[0]["content"] for messages, _ in responder.calls]
+        assert contents == ["BASE", "BASE\n\nFIRST", "BASE\n\nSECOND"]
+
+    def test_a_result_only_control_call_changes_nothing(self):
+        handler = RecordingControlHandler(
+            [ControlResult(result={"ok": False, "error": "recoverable"})]
+        )
+        call = make_tool_call("python_calculate", {"expression": "1+1"})
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        runner = make_runner(responder, executor, control_handler=handler)
+
+        outcome = runner.run_turn(
+            [{"role": "system", "content": "BASE"}, {"role": "user", "content": "hi"}]
+        )
+
+        assert outcome.status is TurnStatus.COMPLETED
+        # Same system block, same declarations, same executor throughout.
+        assert {messages[0]["content"] for messages, _ in responder.calls} == {"BASE"}
+        assert {
+            tuple(t["function"]["name"] for t in tools) for _m, tools in responder.calls
+        } == {("python_calculate",)}
+        assert [name for name, _ in executor.calls] == ["python_calculate"]
+
+
+class TestControlToolIsOptional:
+    def test_a_runner_without_a_handler_dispatches_normally(self):
+        call = make_tool_call("python_calculate", {"expression": "1+1"})
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        runner = make_runner(responder, executor)
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.COMPLETED
+        assert [name for name, _ in executor.calls] == ["python_calculate"]
+
+    def test_a_non_control_name_still_reaches_the_executor(self):
+        handler = RecordingControlHandler()
+        call = make_tool_call("python_calculate", {"expression": "1+1"})
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        runner = make_runner(responder, executor, control_handler=handler)
+
+        runner.run_turn(BASE_MESSAGES)
+
+        assert handler.calls == []
+        assert [name for name, _ in executor.calls] == ["python_calculate"]

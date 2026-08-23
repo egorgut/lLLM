@@ -511,6 +511,7 @@ pytest
 ```bash
 python -m evals.runner --suite scripted   # без Ollama/MCP, безопасно для CI
 python -m evals.runner --suite live       # с реальной моделью и MCP, запускается вручную
+python -m evals.runner --suite live --category skill_live   # ход целиком через SkillTurnOrchestrator
 ```
 
 Результат — версионированный JSON в `data/evals/<timestamp>-<suite>.json`
@@ -669,6 +670,42 @@ host-обёртки, а набор инструментов навык може�
 `turn_finished` поле `selected_skill` теперь означает **навык, активный в конце
 хода**; выбор роутера сохранён в `initial_skill`, а `skill_activations` считает
 смены (`0` для хода, который ведёт себя как раньше).
+
+**Проверка механизма (PATCH-018-01).** SPEC-018 был влит с сокращённой
+верификацией; PATCH-018-01 добирает её. Детерминированные тесты —
+`tests/test_agent_control_tools.py` (сам шов control-tool, без `skill_runtime`)
+и `tests/test_skill_activation.py` (активация через реальный
+`SkillTurnOrchestrator`). Скриптованные кейсы — категории
+`skill_activation_none`, `skill_activation_replace`, `skill_activation_unknown`,
+`skill_activation_cap`. Для живой проверки в `evals/runner.py` появился
+skill-aware live-путь: кейс с `skill_case: true` в режиме `live` прогоняется
+через тот же `SkillTurnOrchestrator`, что и `app.py`, поэтому роутинг и
+активация в оценке — production-код, а не его копия.
+
+```bash
+python -m evals.runner --suite live --profile fast --category skill_live
+python -m evals.runner --suite live --profile mid  --category skill_live
+python -m evals.runner --suite live --profile deep --category skill_live
+```
+
+Кейс `skill-live-cross-001` требует `TRACKER_SMOKE_ISSUE_ID` (реальный ключ
+задачи) — без него подстановка отрендерится видимым маркером «not set». В
+результирующий JSON для таких кейсов пишутся `profile`, `initial`/`final_skill`,
+`skill_activations`, полная последовательность вызовов (включая
+`activate_skill`, которого не видит исполнитель), `model_requests` и тайминги
+каждого запроса к модели. Результаты прогонов — в
+`docs/journal/SPEC-018-mid-turn-skill-activation.md`.
+
+Два живых кейса **красные намеренно**, и это зафиксированный результат, а не
+недоделка. `skill-live-cross-001` упирается в таймаут маршрутизации на всех трёх
+профилях: на двухчастном запросе роутер уходит в неограниченную генерацию
+(дефект SPEC-012, вынесен в отдельный патч) — кейс оставлен как его
+регрессионная цель. `skill-live-cross-explicit-001` ожидает активацию, которую
+модели не делают по своей воле: `activate_skill` им декларируется, но ни fast,
+ни mid, ни deep за ним не тянутся. Подогнать ожидание под факт значило бы стереть
+ровно тот отрицательный результат, ради которого патч и делался. Механизм при
+этом исправен — `skill-live-activation-forced-001` проходит на всех трёх
+профилях.
 
 ## Изолированный sandbox runtime (SPEC-015)
 

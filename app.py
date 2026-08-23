@@ -175,6 +175,34 @@ def _server_for(model_facing_name: str, mcp_servers: dict[str, McpServerConfig])
     return "?"
 
 
+def omitted_skills(
+    mcp_servers: dict[str, McpServerConfig], sandbox: SandboxCapability | None
+) -> frozenset[str]:
+    """Skill packages this deployment cannot honor, so they are never loaded.
+
+    tracker_read depends entirely on the (possibly disabled) Tracker
+    integration; when it is disabled, its tools were never registered, so the
+    package is omitted deterministically as one configured feature unit instead
+    of failing the whole skill-loading pass (SPEC-013 §"Tracker integration is
+    disabled"). code_workspace's only tool is sandbox_execute, so an unavailable
+    or disabled sandbox omits the package by the same rule (SPEC-016 §19.4).
+
+    Extracted from ``main()`` unchanged (PATCH-018-01) so the skill-aware live
+    evaluation path composes exactly the same skill registry the application
+    does — two copies of this rule would drift, and a live skill measurement
+    taken against a different catalog would not describe the real app.
+    """
+
+    omit = (
+        frozenset()
+        if mcp_servers[TRACKER_MCP_SERVER_ID].enabled
+        else frozenset({"tracker_read"})
+    )
+    if sandbox is None:
+        omit = omit | frozenset({SANDBOX_SKILL_NAME})
+    return omit
+
+
 class CliRenderer:
     """Renders agent-loop output to the terminal.
 
@@ -380,18 +408,7 @@ def main(argv: list[str] | None = None) -> None:
             max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
             max_skill_activations_per_turn=MAX_SKILL_ACTIVATIONS_PER_TURN,
         )
-        # tracker_read depends entirely on the (possibly disabled) Tracker
-        # integration; when it is disabled, its tools were never registered,
-        # so the package is omitted deterministically as one configured
-        # feature unit instead of failing the whole skill-loading pass
-        # (SPEC-013 §"Tracker integration is disabled").
-        omit_skills = (
-            frozenset() if mcp_servers[TRACKER_MCP_SERVER_ID].enabled else frozenset({"tracker_read"})
-        )
-        # code_workspace's only tool is sandbox_execute, so an unavailable or
-        # disabled sandbox omits the package by the same rule (SPEC-016 §19.4).
-        if sandbox is None:
-            omit_skills = omit_skills | frozenset({SANDBOX_SKILL_NAME})
+        omit_skills = omitted_skills(mcp_servers, sandbox)
         try:
             skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, registry, omit=omit_skills)
         except SkillPackageError as error:

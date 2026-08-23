@@ -97,6 +97,46 @@ class TestEvaluateExpectation:
         assert failures == []
 
 
+class TestSkillActivationExpectations:
+    """SPEC-018 turned one skill decision into two ends of one (PATCH-018-01)."""
+
+    def test_final_skill_mismatch_is_a_failure(self):
+        failures = evaluate_expectation(
+            make_outcome(),
+            [],
+            {"expected_final_skill": "sales_analysis"},
+            final_skill="tracker_read",
+        )
+        assert len(failures) == 1
+
+    def test_final_skill_match_passes(self):
+        failures = evaluate_expectation(
+            make_outcome(),
+            [],
+            {"expected_final_skill": "sales_analysis"},
+            final_skill="sales_analysis",
+        )
+        assert failures == []
+
+    def test_activation_count_mismatch_is_a_failure(self):
+        failures = evaluate_expectation(
+            make_outcome(), [], {"expected_activations": 1}, activations=0
+        )
+        assert len(failures) == 1
+
+    def test_activation_count_match_passes(self):
+        failures = evaluate_expectation(
+            make_outcome(), [], {"expected_activations": 2}, activations=2
+        )
+        assert failures == []
+
+    def test_skill_keys_are_ignored_when_absent_from_the_expectation(self):
+        failures = evaluate_expectation(
+            make_outcome(), [], {"status": "completed"}, final_skill=None, activations=0
+        )
+        assert failures == []
+
+
 class TestCasesFile:
     def test_committed_cases_load_and_have_unique_stable_ids(self):
         cases = load_cases(DEFAULT_CASES_PATH)
@@ -123,6 +163,16 @@ class TestCasesFile:
             "skill_clarification",
             "skill_policy_violation",
             "skill_routing_repair",
+            "skill_activation_none",
+            "skill_activation_replace",
+            "skill_activation_unknown",
+            "skill_activation_cap",
+            "skill_live_none",
+            "skill_live_sales",
+            "skill_live_tracker",
+            "skill_live_cross",
+            "skill_live_cross_explicit",
+            "skill_live_activation_forced",
             "tracker_issue_lookup",
             "tracker_issue_search",
             "tracker_queue_metadata",

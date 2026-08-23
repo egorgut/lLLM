@@ -33,18 +33,29 @@ from typing import Any
 from agent import AgentRunner
 from config import (
     MAX_IDENTICAL_TOOL_CALLS,
+    MAX_SKILL_ACTIVATIONS_PER_TURN,
+    MAX_SKILL_DESCRIPTION_CHARS,
+    MAX_SKILL_INSTRUCTION_CHARS,
     MAX_SKILL_ROUTING_RESPONSE_CHARS,
+    MAX_SKILL_SCHEMA_BYTES,
+    MAX_SKILLS,
     MAX_TOOL_CALLS_PER_TURN,
     MODEL_PROFILES,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
     SKILLS_ROOT,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
+    TRACE_PAYLOAD_PREVIEW_CHARS,
     ModelProfile,
     resolve_model_profile,
 )
 from conversation import Conversation
 from reliability import TurnStatus, new_id
-from skill_runtime import SkillPackageLoader, SkillRouter, SkillTurnOrchestrator
+from skill_runtime import (
+    SkillPackageLoader,
+    SkillRouter,
+    SkillTurnOrchestrator,
+    validate_skill_config,
+)
 from tests.support import (
     FakeToolExecutor,
     RecordingRenderer,
@@ -54,7 +65,7 @@ from tests.support import (
     make_tool_call,
     make_tool_registry,
 )
-from tracing import NullTraceSink
+from tracing import MemoryTraceSink, NullTraceSink
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -83,6 +94,16 @@ class CaseResult:
     # word, so a skill case reports both ends of the decision.
     final_skill: str | None = None
     skill_activations: int | None = None
+    # PATCH-018-01, live evidence. `tool_sequence` is read from the trace rather
+    # than from the recording executor, because a control tool never reaches an
+    # executor and would otherwise be invisible in the very measurement it is
+    # the subject of. The remaining fields are what SPEC-018 §7.2 asked to
+    # record per profile.
+    profile: str | None = None
+    model_requests: int | None = None
+    tool_sequence: list[str] = field(default_factory=list)
+    activation_events: list[dict[str, Any]] = field(default_factory=list)
+    model_request_ms: list[int] = field(default_factory=list)
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -90,12 +111,20 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
 
 
 def evaluate_expectation(
-    outcome, tool_calls_used: list[str], expectation: dict[str, Any], selection=None
+    outcome,
+    tool_calls_used: list[str],
+    expectation: dict[str, Any],
+    selection=None,
+    final_skill: str | None = None,
+    activations: int | None = None,
 ) -> list[str]:
     """Objective, deterministic assertions only -- no LLM judge (SPEC-011 §6).
 
     `selection` (a `SkillSelection`, present only for skill cases) enables the
     skill-specific keys `expected_selection` and `selection_source` (SPEC-012).
+    `final_skill`/`activations` enable `expected_final_skill` and
+    `expected_activations`, which describe how the skill decision *ended*
+    (SPEC-018): the router's choice alone no longer says what a turn ran under.
     """
 
     failures: list[str] = []
@@ -105,6 +134,20 @@ def evaluate_expectation(
         if got != expectation["expected_selection"]:
             failures.append(
                 f"expected selection={expectation['expected_selection']!r}, got {got!r}"
+            )
+
+    if "expected_final_skill" in expectation:
+        if final_skill != expectation["expected_final_skill"]:
+            failures.append(
+                f"expected final_skill={expectation['expected_final_skill']!r}, "
+                f"got {final_skill!r}"
+            )
+
+    if "expected_activations" in expectation:
+        if activations != expectation["expected_activations"]:
+            failures.append(
+                f"expected skill_activations={expectation['expected_activations']!r}, "
+                f"got {activations!r}"
             )
 
     if "selection_source" in expectation and selection is not None:
@@ -310,7 +353,12 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
 
     tool_calls_used = [name for name, _ in executor.calls]
     failures = evaluate_expectation(
-        result.outcome, tool_calls_used, case["expectation"], selection=result.selection
+        result.outcome,
+        tool_calls_used,
+        case["expectation"],
+        selection=result.selection,
+        final_skill=result.final_skill,
+        activations=result.activations,
     )
     return CaseResult(
         id=case["id"],
@@ -412,6 +460,168 @@ def run_live_case(
         tool_calls=tool_calls_used,
         duration_ms=outcome.duration_ms,
         failures=failures,
+        profile=profile.name,
+        model_requests=outcome.model_requests,
+    )
+
+
+def _turn_events(trace: MemoryTraceSink, turn_id: str) -> list[dict[str, Any]]:
+    return [event for event in trace.events if event.get("turn_id") == turn_id]
+
+
+def run_live_skill_case(
+    case: dict[str, Any],
+    orchestrator: SkillTurnOrchestrator,
+    trace: MemoryTraceSink,
+    executor,
+    profile: ModelProfile,
+) -> CaseResult:
+    """One live case through the *real* skill-aware turn (PATCH-018-01).
+
+    SPEC-018 §7.2 could not be answered by the pre-existing live suite: it drives
+    a raw `AgentRunner`, so no live turn ever routed a skill, and none could
+    activate one. This runs the case through the same `SkillTurnOrchestrator`
+    `app.py` builds, with the same registry, router, skills, limits, and profile
+    deadlines — the eval reimplements no routing or activation semantics of its
+    own, it only observes.
+    """
+
+    conversation = Conversation()
+    conversation.add_user_message(_render_live_prompt(case["prompt"]))
+    executor.calls.clear()
+
+    try:
+        result = orchestrator.run_turn(conversation)
+    except Exception as error:  # pragma: no cover - live-only safety net
+        return CaseResult(
+            id=case["id"],
+            passed=False,
+            status="failed",
+            reason="internal_error",
+            tool_calls=[],
+            duration_ms=0,
+            failures=[f"live skill case raised: {error}"],
+            profile=profile.name,
+        )
+
+    events = _turn_events(trace, result.outcome.turn_id)
+    # The model-decided order, control tools included: `tool_call_requested` is
+    # emitted for every call the loop accepted, before dispatch chooses between
+    # the executor and the host's control handler.
+    tool_sequence = [
+        event["tool_name"] for event in events if event["event"] == "tool_call_requested"
+    ]
+    activation_events = [
+        {
+            "skill": event["skill"],
+            "replaced_skill": event["replaced_skill"],
+            "activation_index": event["activation_index"],
+            "recomposed": event["recomposed"],
+        }
+        for event in events
+        if event["event"] == "skill_activated"
+    ]
+    model_request_ms = [
+        event["duration_ms"]
+        for event in events
+        if event["event"] == "model_response_finished"
+    ]
+
+    tool_calls_used = [name for name, _ in executor.calls]
+    failures = evaluate_expectation(
+        result.outcome,
+        tool_calls_used,
+        case["expectation"],
+        selection=result.selection,
+        final_skill=result.final_skill,
+        activations=result.activations,
+    )
+    return CaseResult(
+        id=case["id"],
+        passed=not failures,
+        status=str(result.outcome.status),
+        reason=str(result.outcome.reason),
+        tool_calls=tool_calls_used,
+        duration_ms=result.outcome.duration_ms,
+        failures=failures,
+        selected_skill=result.selection.skill_name,
+        selection_source=result.selection.source,
+        routing_requests=result.selection.routing_requests,
+        final_skill=result.final_skill,
+        skill_activations=result.activations,
+        profile=profile.name,
+        model_requests=result.outcome.model_requests,
+        tool_sequence=tool_sequence,
+        activation_events=activation_events,
+        model_request_ms=model_request_ms,
+    )
+
+
+def _build_live_orchestrator(
+    registry,
+    executor,
+    mcp_servers,
+    model,
+    profile: ModelProfile,
+    run_id: str,
+    trace: MemoryTraceSink,
+    sandbox,
+) -> SkillTurnOrchestrator:
+    """Assemble the production skill-aware turn exactly as `app.py` does.
+
+    Every component here is the production one — `app.omitted_skills`, the real
+    `SkillPackageLoader`, the real `SkillRouter` on the profile's own routing
+    deadline, the real `SkillTurnOrchestrator` under the host's own limits. The
+    only differences from `app.py:main()` are the ones an eval must have: a
+    recording renderer instead of the CLI one, and an in-memory trace sink the
+    runner can read the evidence back out of.
+    """
+
+    from app import omitted_skills
+
+    validate_skill_config(
+        skill_routing_timeout_seconds=profile.skill_routing_timeout_seconds,
+        skill_routing_repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
+        max_skill_routing_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
+        max_skill_instruction_chars=MAX_SKILL_INSTRUCTION_CHARS,
+        max_skill_schema_bytes=MAX_SKILL_SCHEMA_BYTES,
+        max_skills=MAX_SKILLS,
+        max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
+        max_skill_activations_per_turn=MAX_SKILL_ACTIVATIONS_PER_TURN,
+    )
+    skill_registry = SkillPackageLoader().load_all(
+        SKILLS_ROOT, registry, omit=omitted_skills(mcp_servers, sandbox)
+    )
+    router = SkillRouter(
+        route=model.text,
+        timeout_seconds=profile.skill_routing_timeout_seconds,
+        max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
+        repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
+        payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
+    )
+    return SkillTurnOrchestrator(
+        skill_registry=skill_registry,
+        router=router,
+        tool_registry=registry,
+        executor=executor,
+        respond=model.respond,
+        renderer_factory=RecordingRenderer,
+        default_tools=registry.to_ollama_tools(),
+        run_id=run_id,
+        max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+        max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
+        model_request_timeout_seconds=profile.model_request_timeout_seconds,
+        tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
+        agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
+        trace_sink=trace,
+        payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
+        max_skill_activations=MAX_SKILL_ACTIVATIONS_PER_TURN,
+        on_turn_context=(
+            sandbox.workspace.begin_turn if sandbox else lambda _context: None
+        ),
+        redacted_argument_tools=(
+            frozenset({sandbox.spec.name}) if sandbox else frozenset()
+        ),
     )
 
 
@@ -421,8 +631,15 @@ def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[
     # import out of the module top level means the scripted suite (and the
     # rest of the test/import graph) never depends on any of that.
     from app import build_executor, build_mcp_servers, load_dotenv_if_present, register_mcp_tools
+    from config import (
+        PROJECT_ROOT,
+        SANDBOX_ARTIFACT_ROOT,
+        SANDBOX_TOOL_ENABLED,
+        SANDBOX_TURN_TIME_MARGIN_SECONDS,
+    )
     from llm import OllamaModel
     from mcp_integration import McpClientManager, McpStartupError
+    from sandbox_tool import build_sandbox_capability
 
     # Same gap-filling as app.py's main(): a local .env supplies Tracker
     # credentials for this manual live run without needing them re-exported.
@@ -431,6 +648,24 @@ def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[
     registry, executor = build_executor()
     recording_executor = _RecordingExecutorWrapper(executor)
     run_id = new_id()
+    trace = MemoryTraceSink()
+    skill_cases = [case for case in cases if case.get("skill_case")]
+    # The sandbox is built only for the skill-aware path (PATCH-018-01): it adds
+    # a tool declaration, and the pre-existing live suite's model-facing tool
+    # list must stay exactly what it was before this patch.
+    sandbox = None
+    if skill_cases:
+        sandbox, _diagnostic = build_sandbox_capability(
+            run_id=run_id,
+            artifact_root=SANDBOX_ARTIFACT_ROOT,
+            project_root=PROJECT_ROOT,
+            turn_time_margin_seconds=SANDBOX_TURN_TIME_MARGIN_SECONDS,
+            enabled=SANDBOX_TOOL_ENABLED,
+            trace_sink=trace,
+        )
+        if sandbox is not None:
+            registry.register(sandbox.spec)
+            executor.register_handler(sandbox.spec.name, sandbox.handler)
     # Reuses exactly the same effective server map (static local servers +
     # conditional Tracker) that app.py's main() builds, so a live Tracker
     # eval and a live `python app.py` session see identical MCP configuration.
@@ -464,8 +699,27 @@ def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[
 
         model = OllamaModel.for_profile(profile)
 
+        orchestrator = (
+            _build_live_orchestrator(
+                registry,
+                recording_executor,
+                mcp_servers,
+                model,
+                profile,
+                run_id,
+                trace,
+                sandbox,
+            )
+            if skill_cases
+            else None
+        )
+
         return [
-            run_live_case(case, recording_executor, tools, model.respond, run_id, profile)
+            run_live_skill_case(case, orchestrator, trace, recording_executor, profile)
+            if case.get("skill_case")
+            else run_live_case(
+                case, recording_executor, tools, model.respond, run_id, profile
+            )
             for case in cases
         ]
     finally:
@@ -527,7 +781,12 @@ def write_results(
                 "routing_requests": result.routing_requests,
                 "final_skill": result.final_skill,
                 "skill_activations": result.skill_activations,
+                "profile": result.profile,
+                "model_requests": result.model_requests,
                 "tool_calls": result.tool_calls,
+                "tool_sequence": result.tool_sequence,
+                "activation_events": result.activation_events,
+                "model_request_ms": result.model_request_ms,
                 "duration_ms": result.duration_ms,
                 "failures": result.failures,
             }

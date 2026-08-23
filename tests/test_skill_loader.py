@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from skill_runtime.activation import ACTIVATE_SKILL_TOOL_NAME
 from skill_runtime.loader import SkillPackageError, SkillPackageLoader
 from tests.support import make_tool_registry
 
@@ -453,3 +454,35 @@ def test_omit_of_unknown_name_is_harmless(tmp_path):
         tmp_path, tool_registry(), omit=frozenset({"does_not_exist"})
     )
     assert [s.name for s in registry.list_skills()] == ["sample_skill"]
+
+
+# The reserved `activate_skill` name (SPEC-018 §4.2, §7.1/12). Both collisions
+# fail at startup: `load_all` is the one fail-fast place `app.py` and
+# `evals/runner.py` already call, so neither can begin a run with one name
+# meaning two things to the model.
+def test_registered_tool_named_activate_skill_is_rejected(tmp_path):
+    write_package(tmp_path)
+    registry = make_tool_registry("alpha", "beta", ACTIVATE_SKILL_TOOL_NAME)
+    with pytest.raises(SkillPackageError, match="reserved by the host"):
+        loader().load_all(tmp_path, registry)
+
+
+def test_reserved_tool_name_is_rejected_even_with_no_packages(tmp_path):
+    registry = make_tool_registry(ACTIVATE_SKILL_TOOL_NAME)
+    with pytest.raises(SkillPackageError, match="reserved by the host"):
+        loader().load_all(tmp_path, registry)
+
+
+def test_skill_package_named_activate_skill_is_rejected(tmp_path):
+    write_package(tmp_path, name=ACTIVATE_SKILL_TOOL_NAME)
+    with pytest.raises(SkillPackageError, match="reserved by the host"):
+        loader().load_all(tmp_path, tool_registry())
+
+
+def test_reserved_skill_package_is_rejected_even_when_omitted(tmp_path):
+    # The collision is structural, so the omit escape hatch cannot hide it.
+    write_package(tmp_path, name=ACTIVATE_SKILL_TOOL_NAME)
+    with pytest.raises(SkillPackageError, match="reserved by the host"):
+        loader().load_all(
+            tmp_path, tool_registry(), omit=frozenset({ACTIVATE_SKILL_TOOL_NAME})
+        )

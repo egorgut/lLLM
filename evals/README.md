@@ -30,7 +30,22 @@ purpose isn't something the eval should require of a real model.
 ```bash
 python -m evals.runner --suite scripted   # default; no Ollama, no MCP server, no DB
 python -m evals.runner --suite live       # optional; needs Ollama + MCP running
+python -m evals.runner --suite live --profile deep --category skill_live
 ```
+
+A case marked `skill_case: true` runs through the real `SkillTurnOrchestrator`
+rather than a raw `AgentRunner` — the router selects a skill, the tool view is
+restricted to it, and the model may replace it mid-turn through `activate_skill`
+(SPEC-018). This holds in **both** suites: scripted skill cases drive the real
+orchestrator with a scripted router and model, and live skill cases
+(PATCH-018-01) drive it with the real ones, assembled from the same production
+components `app.py` uses — `app.omitted_skills`, `SkillPackageLoader`,
+`SkillRouter`, and the profile's own deadlines. The evaluation reimplements no
+routing or activation semantics of its own.
+
+`skill-live-cross-001` needs `TRACKER_SMOKE_ISSUE_ID` set to a real issue key;
+an unset placeholder renders as a visible "not set" marker so a misconfigured
+run fails obviously.
 
 The scripted suite drives `AgentRunner` with the same fixtures as the
 committed unit tests (`tests/support.py`) — no live Ollama, no live MCP
@@ -73,7 +88,17 @@ Each run writes one versioned JSON file to `data/evals/<timestamp>-<suite>.json`
 ## Assertions
 
 `evaluate_expectation()` in `runner.py` supports: expected status, expected
-termination reason, required tool names, allowed tool names, minimum/maximum
-tool-call count, answer contains substring (case-insensitive), answer matches
-a regular expression, and a maximum duration. Answer checks only run for a
-`completed` outcome.
+termination reason, required tool names, allowed tool names, forbidden tool
+names, minimum/maximum tool-call count, answer contains substring
+(case-insensitive), answer matches a regular expression, and a maximum duration.
+Answer checks only run for a `completed` outcome.
+
+Skill cases add four more: `expected_selection` and `selection_source` (the
+router's decision, SPEC-012), plus `expected_final_skill` and
+`expected_activations` (how that decision *ended*, SPEC-018 — the router's
+choice alone no longer describes what a turn ran under).
+
+A live skill case also records, per case: `profile`, `model_requests`, the full
+`tool_sequence` read from the trace (so `activate_skill` appears in its real
+position — a control tool never reaches an executor and would otherwise be
+invisible), `activation_events`, and `model_request_ms` per model request.
