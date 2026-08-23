@@ -4,8 +4,8 @@
 - **Parent spec:** [SPEC-017](../../../specs/SPEC-017-Model-Profiles.md)
 - **Date:** 2026-08-23
 - **Branch:** patch/PATCH-017-02-next-model-profile
-- **Implementation commit:** `PENDING`
-- **Merge commit:** `PENDING`
+- **Implementation commit:** `be319a4`
+- **Merge commit:** `c1b14c9`
 
 ## Hypothesis / intent
 
