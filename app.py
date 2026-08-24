@@ -242,10 +242,20 @@ class CliRenderer:
         self._indicator.start()
 
     def text(self, chunk: str) -> None:
+        # Text arriving means the CLI is no longer silent -- unconditionally, not
+        # only for the turn's first answer segment (PATCH-010-04). These are two
+        # separate decisions and `_printed_prefix` answers only the second one:
+        # a turn shaped text -> tool call -> text restarts the indicator in
+        # `tool_call`/`tool_result`, so gating the stop on the prefix left the
+        # spinner animating on top of the streaming answer, each frame
+        # overwriting a different part of it through `\r`.
+        #
+        # `stop()` is idempotent and returns after one lock acquisition when
+        # nothing is running, so paying it per chunk buys a rule with no state in
+        # it: text stops the indicator, always.
+        self._indicator.stop()
         if not self._printed_prefix:
-            # The final answer has begun: stop for good, once, rather than on
-            # every chunk. Runs on the loop's worker thread (agent.py).
-            self._indicator.stop()
+            # Runs on the loop's worker thread (agent.py).
             print("\nQwen: ", end="", flush=True)
             self._printed_prefix = True
         print(chunk, end="", flush=True)
