@@ -3,8 +3,8 @@
 - **Spec:** [SPEC-019](../../specs/SPEC-019-Component-Specific-Model-Profiles.md)
 - **Date:** 2026-08-24
 - **Branch:** feature/SPEC-019-component-specific-model-profiles
-- **Implementation commit:** `<short-sha>`
-- **Merge commit:** `<short-sha>`
+- **Implementation commit:** `9462881`
+- **Merge commit:** `42855c1`
 
 ## Hypothesis / intent
 
