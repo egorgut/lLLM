@@ -420,3 +420,136 @@ Scope stayed inside the patch: no new dependency, no configuration switch, no
 colour or ANSI, and MCP `image`/`resource` content blocks — still dropped in
 `adapter.py::_join_text` — were left alone, since supporting them would change
 what the model receives and belongs in its own SPEC.
+
+### PATCH-010-03 — Turn Elapsed Time Display
+
+- **Patch:** [PATCH-010-03](../../patches/SPEC-010/PATCH-010-03-Turn-Elapsed-Time-Display.md)
+- **Date:** 2026-08-24
+- **Branch:** patch/PATCH-010-03-turn-elapsed-time-display
+- **Implementation commit:** `<short-sha>`
+- **Merge commit:** `<short-sha>`
+
+#### Reason
+
+PATCH-010-01 answered "is it hung?". It did not answer "how long has this been
+going?", and on this project the honest answer ranges over two orders of
+magnitude: routing takes ~0.8 s on `fast` and ~2.7–4.9 s on `next`; a single
+tool-emitting decision ~11 s against ~26–33 s; the SPEC-019 split run measured a
+58.7 s turn, and profile turn deadlines go up to 600 s. A spinner at second 3 and
+a spinner at second 300 are the same picture, so the user cannot tell an ordinary
+`deep` turn from one that is going wrong. Meanwhile the harness already measures
+the duration — `AgentTurnOutcome.duration_ms` is computed for every turn and then
+discarded by the chat loop — and nothing in `app.py` has ever printed it.
+
+#### Change
+
+Presentation only; no agent policy, prompt, tool contract, transport, tracing,
+persistence, deadline, or model change. The `agent.Renderer` protocol is
+untouched, so `RecordingRenderer` and `evals/runner.py` needed no edits.
+
+- `cli_activity.py`: `format_elapsed()` (`4.2s` / `52.6s` / `3m 21.4s`, rounded
+  before the minute split so the line never reads `60.0s` for one frame) and
+  `format_turn_time()` (`[time] 52.6s`), shared so the ticking counter and the
+  footer cannot drift apart. `ActivityIndicator` gains an injected `clock`
+  (the project's established test seam), a turn-scoped origin, and the counter in
+  its frame: `⠋ Working... 4.2s`.
+- The origin is stamped by `__enter__`, not by `start()`. The indicator stops and
+  restarts once per durable line, so a per-`start()` origin would reset the
+  counter at every `[skill]`, `[tool N/4]`, and `[result]` — the number would
+  measure the current silence rather than the turn. A bare `start()` outside a
+  `with` block still stamps its own.
+- Erase width became dynamic. It used to be fixed at construction
+  (`max(frame) + 1 + len(label)`); a counter growing to `1m 41.0s` draws a wider
+  line than that, and a fixed erase would have left its tail on screen. The
+  widest line drawn since the last stop is tracked and erased instead — read
+  without a lock, safely, because `stop()` only reads it after `thread.join()`.
+- `app.py`: one wall clock stamped before `with indicator:`, and
+  `print_turn_time(indicator, seconds)` in all four outcome branches — completed,
+  cancelled, failed, and the unexpected-exception path that has no `outcome` at
+  all. `outcome.duration_ms` was deliberately *not* reused despite already
+  covering routing plus the agent loop: it is absent on that exception path, and
+  a second origin could disagree with the counter the user just watched.
+- The completed branch now terminates the streamed answer with `print()` before
+  the footer. The first pty run caught this: the final answer is streamed without
+  a trailing newline, so the footer landed glued to the end of the last sentence:
+
+```text
+Расчёт основан на суммировании (UnitPrice × Quantity) ... из таблицы InvoiceLine.[time] 24.5s
+```
+
+#### The TTY-only decision
+
+Both the counter and the footer appear only when stdout is a TTY, gated on the
+indicator's existing `enabled` property rather than a second `isatty` check.
+
+This is the load-bearing choice. PATCH-010-01 promised non-TTY stdout "not a
+single byte ... so redirected output, test captures, and the transcripts already
+committed to `README.md` and the journals stay byte-for-byte unchanged", and
+PATCH-010-02 chose a fixed `TOOL_DISPLAY_WIDTH` over the real terminal width for
+the same reason. A wall-clock duration is irreproducible by construction, so
+printing it into piped output would have broken precisely what those two patches
+were built to protect. Every committed transcript therefore stays correct as
+written and none were touched.
+
+An "always print, behind a `--show-time` flag" variant was considered and
+rejected: it would add configuration and lifecycle semantics, which is SPEC
+territory, not a patch.
+
+#### Verification
+
+- `python -m pytest tests/test_cli_activity.py -q` — 36 passed, from 19. New
+  groups cover the formatter at its boundaries (`59.94` → `59.9s`, `59.96` →
+  `1m 00.0s`, negative clock readings), that the counter is cumulative across a
+  stop/start cycle within one turn, that a new turn restarts from zero, that
+  erasure clears a line that grew past the label and does not carry that width
+  into the next turn, that a redirected stream still receives zero bytes with the
+  clock advanced an hour, and that the footer prints on a TTY and not otherwise.
+  One existing assertion changed: `test_start_draws_the_first_frame_immediately`
+  now expects `\r⠋ Working... 0.0s`. Nothing sleeps — the tests drive a
+  `FakeClock` and redraw through the public `stop()`/`start()` path, which is
+  what a real turn does around every durable line.
+- `python -m pytest -q` — 754 passed, 29 skipped (from 737/29).
+- `python -m evals.runner --suite scripted` — 40/40, unchanged.
+- Non-TTY, live: `printf '…\n/bye\n' | python app.py > piped.txt` exited `0` with
+  **0** carriage returns, **0** frame glyphs, and **0** `[time]` lines. The
+  transcript is identical in shape to pre-patch.
+- TTY, live: `app.py` driven inside a real pty against `fast`/qwen3:8b. Within
+  the chat region the capture holds **77** spinner frames with **77 distinct**
+  counter readings advancing `0.0s → 9.4s`, **2** erase sequences (one per silent
+  stretch), **0** ANSI escapes, and exactly **1** `[time]` line. Replaying the
+  carriage returns the way a terminal does leaves **0** lines showing a spinner
+  frame or a stale counter:
+
+```text
+You: Какой жанр принёс больше всего выручки?
+[skill] sales_analysis
+
+Qwen: Жанр, который принёс больше всего выручки, — **Rock**.
+**Общая выручка:** $826.65.
+
+Расчёт основан на суммировании `(UnitPrice × Quantity)` для всех треков в жанре "Rock".
+[time] 10.9s
+```
+
+- **A discrepancy worth recording rather than hiding:** the footer read `10.9s`
+  while the last counter frame read `9.4s`. That is correct and not a rounding
+  artefact — the indicator stops for good on the first final-answer chunk
+  (PATCH-010-01's rule), and the turn kept running for another ~1.5 s while the
+  rest of the answer streamed. The counter measures up to the last moment the CLI
+  was silent; the footer measures the whole turn. `README.md` now says so.
+- No live *model-behavior* verification is required (`patches/README.md` →
+  Verification): the model saw exactly the same prompts, tools, and results. The
+  live runs exist to prove terminal behavior, not to judge the model.
+
+#### Outcome
+
+All acceptance criteria met. The counter measures the turn rather than the
+current silence, the footer appears for every outcome, erasure follows the grown
+line, and the non-TTY byte-for-byte guarantee is intact — which is why none of
+the eight committed `README.md` transcripts needed editing.
+
+Scope stayed inside the patch: no per-phase breakdown, no tokens/s or GPU
+telemetry, no ETA, no configuration flag, no trace or `duration_ms` change, and
+no colour or ANSI. PATCH-010-01's `## Out of scope` deferred "richer runtime
+telemetry" to separate work; this took only the cheapest, least speculative
+measurement available and left the rest deferred.
