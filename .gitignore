@@ -33,6 +33,11 @@ data/.chinook.sqlite.*.tmp
 data/traces/
 data/evals/
 
+# MCP child process logging (PATCH-009-01): each server's own stderr, one file
+# per run, kept off the terminal but on disk so a failing child can still be
+# diagnosed. Generated, local-only, never uploaded.
+data/mcp/
+
 # Per-job sandbox scratch space (SPEC-015): read-only source/input mounts and
 # the collected output copy. Every job directory is deleted after its result is
 # built, so nothing here should survive a run — no generated artifact, source

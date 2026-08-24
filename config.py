@@ -139,6 +139,19 @@ TRACE_ENABLED = True
 TRACE_DIR = "data/traces"
 TRACE_PAYLOAD_PREVIEW_CHARS = 1000
 
+# Where MCP child processes' own stderr goes (PATCH-009-01). Every MCP server is
+# a child process speaking stdio, and the SDK's `stdio_client` defaults its
+# `errlog` to this process's stderr -- i.e. straight onto the user's terminal,
+# where the SDK's per-request `INFO` logging collides with the CLI's own output
+# and with the activity indicator. One file per run, like traces (PATCH-011-01),
+# generated and git-ignored.
+#
+# Redirected rather than discarded on purpose: SPEC-009 keeps startup errors
+# anonymous ("The MCP server could not be started."), so this stream is the only
+# place a failing child explains itself -- PATCH-013-01 was diagnosed from
+# exactly such a traceback.
+MCP_LOG_DIR = "data/mcp"
+
 # External Yandex Tracker MCP server (SPEC-013). Disabled by default; a fresh
 # checkout never needs Tracker credentials. Enabling requires TRACKER_TOKEN and
 # exactly one organisation-id variable (TRACKER_CLOUD_ORG_ID or

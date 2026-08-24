@@ -15,6 +15,7 @@ from config import (
     MAX_SKILL_SCHEMA_BYTES,
     MAX_SKILLS,
     MAX_TOOL_CALLS_PER_TURN,
+    MCP_LOG_DIR,
     MCP_SERVERS,
     MODEL_PROFILES,
     PROJECT_ROOT,
@@ -518,11 +519,19 @@ def main(argv: list[str] | None = None) -> None:
                 call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
                 run_id=run_id,
                 trace_sink=trace_sink,
+                # Child servers log to a per-run file instead of this terminal
+                # (PATCH-009-01), where the SDK's per-request INFO lines used to
+                # collide with the CLI's own output.
+                log_dir=MCP_LOG_DIR,
             )
             manager.start()
             register_mcp_tools(registry, executor, manager, mcp_servers)
         except McpStartupError as error:
             print(f"MCP startup failed for server '{error.server_id}': {error}")
+            # The error itself stays anonymous by SPEC-009's rule; the child's
+            # own reason is in its log, so at least say where to look.
+            if manager is not None and manager.log_path is not None:
+                print(f"The server's own output is in {manager.log_path}")
             raise SystemExit(1)
 
         tools = registry.to_ollama_tools()

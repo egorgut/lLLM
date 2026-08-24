@@ -220,3 +220,132 @@ shutdown with no orphan process, and semantic-only history.
   notifications and runtime tool refresh.
 - MCP SDK 2.x migration in a dedicated iteration (currently pinned `<2`).
 - Consider whether any local tool should later move behind an MCP boundary.
+
+## Patches
+
+### PATCH-009-01 — Redirect MCP child logging off the terminal
+
+- **Patch:** [PATCH-009-01](../../patches/SPEC-009/PATCH-009-01-Redirect-MCP-Child-Logging.md)
+- **Date:** 2026-08-24
+- **Branch:** patch/PATCH-009-01-redirect-mcp-child-logging
+- **Implementation commit:** `<short-sha>`
+- **Merge commit:** `<short-sha>`
+
+#### Reason
+
+Found while diagnosing PATCH-010-04. That patch fixed the renderer writing the
+answer while its own spinner animated; the same capture also showed a second,
+unrelated collision:
+
+```text
+⠋ Working... 23.5s[08/24/26 21:29:36] INFO  Processing request of type  server.py:733
+                            CallToolRequest
+```
+
+This one is not ours to fix in the renderer. `_serve` entered the transport as
+`stdio_client(params)`, and the SDK's signature is
+`stdio_client(server, errlog=sys.stderr)` — so every child server's stderr was
+our terminal. Both the local `time` server and the Tracker server run the MCP
+SDK, whose server side logs one `INFO` line per request through `rich`, with ANSI
+colour and OSC-8 hyperlinks. A second process owning the same tty is something
+PATCH-010-01's discipline cannot defend against: joining the animation thread
+before durable output governs *this* process only.
+
+The noise scaled with tool use — one block per MCP call plus one per server at
+startup — and, worse, it looked enough like the renderer defect to cost real
+diagnosis time. Two different causes producing similar damage was worth reducing
+to one.
+
+#### Change
+
+The child's stderr goes to a per-run local file instead of the terminal,
+following PATCH-011-01's convention for traces — one file per run, generated,
+git-ignored, never uploaded:
+
+```text
+data/mcp/mcp-<run_id>.log
+```
+
+- `config.py`: `MCP_LOG_DIR = "data/mcp"`.
+- `mcp_integration/client.py`: `mcp_log_path()` mirroring `tracing.trace_file_path`;
+  `McpClientManager(..., log_dir=None)`; `start()` opens the run's file and every
+  `stdio_client` is handed it as `errlog`; `close()` releases it on every path,
+  including a `start()` that failed before the loop existed; a `log_path`
+  property so the entry point can name the file.
+- `app.py` and `evals/runner.py` pass `MCP_LOG_DIR`, so the live eval path
+  composes exactly as the application does.
+- `.gitignore`: `data/mcp/`.
+
+**Redirected, not discarded.** This is the decision the patch turns on. SPEC-009
+deliberately keeps startup errors anonymous — "no tracebacks, paths,
+environment, or raw stderr reach the caller" — so the CLI prints `The MCP server
+could not be started.` and nothing else. That makes child stderr the only place a
+failing server explains itself, and it is how PATCH-013-01 was diagnosed: MCP SDK
+2.0 removed `mcp.server.fastmcp`, the pinned Tracker server imports it, and the
+child died on import. Throwing the stream away would have traded a cosmetic
+problem for an undiagnosable class of failure. Instead the startup message now
+adds one line naming the log file — the taxonomy and the anonymity of
+`McpStartupError` itself are untouched, because a location is not content.
+
+Two smaller choices worth recording:
+
+- `log_dir` defaults to `None`, meaning the historical `sys.stderr`. The
+  parameter is purely additive, so any caller that does not pass it behaves
+  exactly as before — and that default is itself pinned by a test.
+- An unwritable log directory falls back to `sys.stderr` rather than raising.
+  Noisy but working beats refusing to start over a logging concern.
+
+The fix is host-side and uniform. Setting log levels through a server's own
+environment was rejected: third-party servers are not ours to configure, and a
+per-server rule would not cover the next one.
+
+#### Verification
+
+- `python -m pytest -q` — 763 passed, 29 skipped (from 757/29). `FakeMcpEnvironment`
+  now records the `errlog` each `stdio_client` receives, mirroring the real
+  signature, so the new `TestChildLogging` asserts the redirect without a
+  subprocess: both children get the run's file and not `sys.stderr`; they share
+  one handle (one file per run, not per server); the file lands under the
+  configured directory; omitting `log_dir` keeps `sys.stderr` for both; `close()`
+  releases the handle after a clean start *and* after a failed one; an unwritable
+  directory falls back to `sys.stderr`.
+- `python -m evals.runner --suite scripted` — 40/40, unchanged.
+- TTY, live: the same Tracker prompt whose earlier capture carried three
+  collisions, driven through a pty against `fast`/qwen3:8b. The whole capture now
+  contains **0** `server.py` lines, **0** `INFO` lines, and **0** ANSI escapes
+  (against 126 before), with no spinner residue after replaying the carriage
+  returns:
+
+```text
+You: найди задачу DEV-457 в трекере
+[skill] tracker_read
+
+[tool 1/4] mcp_tracker__issue_get
+[args] issue_id=DEV-457, include_description=false
+[result] ok · tracker/issue_get · 12.4 KB
+  … 407 more lines
+
+Qwen: Задача **DEV-457** в трекере:
+- **Название**: Optimacros. DWH access - Import
+- **Статус**: Решен
+[time] 25.5s
+```
+
+  And the lines that used to be on screen are on disk instead —
+  `data/mcp/mcp-331fcf5d-….log` holds one `ListToolsRequest` from startup and one
+  `CallToolRequest` from the tool call.
+- No live *model-behavior* verification is required (`patches/README.md` →
+  Verification): the model's prompts, tools, and results are untouched. The live
+  runs exist to prove the terminal and the log file, not to judge the model.
+
+#### Outcome
+
+All acceptance criteria met. The terminal carries only this application's output,
+a failing child is still diagnosable and now says where to look, and the
+historical behaviour survives as the default for any caller that does not opt in.
+
+Scope held: no change to the error taxonomy, tool results, admission policy,
+timeouts, or anything model-facing; no log rotation, retention, or size bounds;
+no per-server special cases; no attempt to configure a third-party server's own
+logger; and nothing touched in the renderer, which is PATCH-010-01/-04's
+business.

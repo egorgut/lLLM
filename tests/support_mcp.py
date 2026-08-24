@@ -101,6 +101,9 @@ class FakeMcpEnvironment:
     def __init__(self, monkeypatch) -> None:
         self._specs_by_key: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
         self.stdio_client_calls: list[tuple[str, tuple[str, ...]]] = []
+        # Where each launched child was told to send its stderr (PATCH-009-01),
+        # in call order, so a test can assert the redirect without a subprocess.
+        self.errlogs: list[Any] = []
         self.session_calls: list[tuple[str, tuple[str, ...]]] = []
         monkeypatch.setattr("mcp_integration.client.stdio_client", self._fake_stdio_client)
         monkeypatch.setattr("mcp_integration.client.ClientSession", self._fake_client_session)
@@ -123,9 +126,12 @@ class FakeMcpEnvironment:
             "call_handler": call_handler,
         }
 
-    def _fake_stdio_client(self, params: Any) -> _FakeTransport:
+    def _fake_stdio_client(self, params: Any, errlog: Any = None) -> _FakeTransport:
+        # `errlog` mirrors the real `stdio_client(server, errlog=sys.stderr)`
+        # signature, so the manager's choice of destination is observable here.
         key = (params.command, tuple(params.args))
         self.stdio_client_calls.append(key)
+        self.errlogs.append(errlog)
         return _FakeTransport(key)
 
     def _fake_client_session(self, read_stream: Any, write_stream: Any) -> FakeSession:
