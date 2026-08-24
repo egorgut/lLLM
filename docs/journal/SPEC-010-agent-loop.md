@@ -553,3 +553,136 @@ telemetry, no ETA, no configuration flag, no trace or `duration_ms` change, and
 no colour or ANSI. PATCH-010-01's `## Out of scope` deferred "richer runtime
 telemetry" to separate work; this took only the cheapest, least speculative
 measurement available and left the rest deferred.
+
+### PATCH-010-04 — Stop the indicator on every answer segment
+
+- **Patch:** [PATCH-010-04](../../patches/SPEC-010/PATCH-010-04-Stop-Indicator-On-Every-Answer-Segment.md)
+- **Date:** 2026-08-24
+- **Branch:** patch/PATCH-010-04-stop-indicator-on-every-answer-segment
+- **Implementation commit:** `<short-sha>`
+- **Merge commit:** `<short-sha>`
+
+#### Reason
+
+Reported from a live Tracker session: the final answer came out shredded, with
+spinner frames written through it.
+
+```text
+⠙ Working... 56.8sтимакросом:язанные с Оп
+⠋ Working... 57.9s | Статус |нитель
+⠦ Working... 1m 02.3s |ешён✅ав Павли | И
+```
+
+`CliRenderer.text()` stopped the indicator only on the turn's **first** answer
+segment, because the stop sat inside the `_printed_prefix` guard. One flag was
+deciding two unrelated things: "has `Qwen: ` been printed?" — genuinely once per
+turn — and "is the CLI still silent?" — which is not, since `tool_call()` and
+`tool_result()` restart the indicator after every tool.
+
+So a turn shaped **text → tool call → text** streams its second answer segment
+with the animation still running, and both writers own the same line through
+`\r`.
+
+The reported turn had exactly that shape: the model's first `issues_find` found
+nothing, it said so ("По названию ничего не нашёл. Попробую поискать в описании
+задач."), and only then issued a second search. The defect normally hides because
+a tool-selecting response usually streams no text at all — `text_chunks()` stops
+yielding at the first tool call — so it needs a response carrying text *and* a
+tool call.
+
+**This is a PATCH-010-01 defect, not a PATCH-010-03 one.** PATCH-010-03 only
+changed how much damage it does: a static `⠋ Working...` overwrote the same 13
+characters every frame, while a counter changes its content and its width on
+every frame and so destroys a different part of the answer each time. Recording
+this plainly matters — the timer surfaced the bug, it did not introduce it.
+
+#### Change
+
+One line moved, in `app.py`:
+
+```python
+def text(self, chunk: str) -> None:
+    self._indicator.stop()          # unconditional now
+    if not self._printed_prefix:
+        print("\nQwen: ", end="", flush=True)
+        self._printed_prefix = True
+    print(chunk, end="", flush=True)
+```
+
+Text arriving means the silence is over, whatever segment it belongs to. The
+prefix guard keeps only its own job. `stop()` is idempotent and returns after one
+lock acquisition when nothing is running, so paying it per chunk costs nothing
+measurable and buys a rule with no state in it.
+
+`tests/test_cli_activity.py`'s `MarkerIndicator` had to become faithful to that
+idempotency: it printed `<stop>` unconditionally, so the per-chunk stop made it
+emit markers where a real terminal stays silent, and one existing assertion
+failed for a reason that had nothing to do with the defect. It now ignores a stop
+when already stopped, exactly as `ActivityIndicator.stop()` does, and starts out
+*running* — the state a renderer always meets in production, since the chat loop
+enters `with indicator:` before `run_turn`. Every pre-existing assertion in the
+file then held unchanged, including `stops == starts + 1`.
+
+#### Verification
+
+- `python -m pytest tests/test_cli_activity.py -q` — 39 passed, from 36.
+- **The regression tests were confirmed to fail without the fix.** Stashing only
+  `app.py` and re-running `TestTextAfterAToolCall`: 2 failed, 1 passed — the
+  marker-interleaving test (no `<stop>` before the second segment) and the
+  real-indicator test (the stream ends on a drawn frame instead of an erase).
+  The third, which pins `Qwen: ` to exactly one appearance, passes either way by
+  design: it guards the fix rather than proving it.
+- `python -m pytest -q` — 757 passed, 29 skipped (from 754/29).
+- `python -m evals.runner --suite scripted` — 40/40, unchanged.
+- Non-TTY, live: 0 carriage returns, 0 frame glyphs, 0 `[time]` lines, and the
+  first eight lines byte-identical to a capture taken before this patch.
+- TTY, live: the reported prompt ("найди любую задачу связанную с оптимакросом")
+  driven through a pty against `fast`/qwen3:8b. Three `issues_find` calls, one
+  `Qwen: ` prefix, one `[time] 55.1s`, and a long markdown answer with headings
+  and a list rendered intact — no line where answer text shares a row with a
+  spinner frame.
+
+```text
+[tool 3/4] mcp_tracker__issues_find
+[result] ok · tracker/issues_find · 3.5 KB
+  … 139 more lines
+
+Qwen: Вот три задачи, связанные с **Optimacros**:
+### 1. **DEV-457**
+**Статус:** ✅ Решён
+…
+[time] 55.1s
+```
+
+- Honest limitation: that live run did not itself reproduce the text → tool →
+  text shape — the model went straight to tool calls, and two of them failed
+  argument validation before the third succeeded. Model behaviour is stochastic,
+  so the *proof* of this fix is the deterministic test that fails without it; the
+  live run shows a real multi-tool Tracker turn rendering cleanly.
+- No live *model-behavior* verification is required (`patches/README.md` →
+  Verification): nothing the model sees changed.
+
+#### A separate writer, deliberately left alone
+
+The same live capture shows three lines where a spinner frame collides with
+something else:
+
+```text
+⠋ Working... 23.5s[08/24/26 21:29:36] INFO  Processing request of type  server.py:733
+```
+
+That is not this project's output — it is the Tracker MCP child process logging
+to the same terminal. None of those lines contains answer text. It is a real,
+pre-existing annoyance with a different cause (a second process owning the tty,
+not a renderer state bug) and a different fix, so it stays out of this patch:
+one PATCH, one correction.
+
+#### Outcome
+
+All acceptance criteria met. The indicator is stopped for every answer segment,
+`Qwen: ` still appears exactly once per turn, non-TTY output is unchanged, and
+the two failing-without-the-fix tests pin the behaviour. Scope held: no change to
+the counter or the `[time]` footer, no change to how answer segments are
+labelled, no attempt to make `text_chunks()` drop text from a tool-calling
+response — that would change what the user is told about the model's reasoning
+and needs its own patch and its own evidence.

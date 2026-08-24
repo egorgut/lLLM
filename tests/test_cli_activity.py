@@ -82,17 +82,35 @@ class MarkerIndicator:
     Printing through `print` (like `CliRenderer` does) puts the markers in the
     same captured stream as the real output, so a test asserts the *interleaving*
     directly instead of comparing two separately recorded sequences.
+
+    It models the real class's idempotency (PATCH-010-04): stopping something
+    already stopped writes nothing and counts for nothing, exactly as
+    `ActivityIndicator.stop()` returns without touching the stream when no
+    animation thread is running. Without that, a marker would appear where the
+    real terminal stays silent, and the interleaving assertions would be
+    measuring the double rather than the renderer.
+
+    It also starts out *running*, which is the state a renderer always meets in
+    production: the chat loop enters `with indicator:` before `run_turn`, since
+    the turn's first silence -- skill routing -- precedes any renderer.
     """
 
     def __init__(self) -> None:
         self.starts = 0
         self.stops = 0
+        self._active = True
 
     def start(self) -> None:
+        if self._active:
+            return
+        self._active = True
         self.starts += 1
         print("<start>")
 
     def stop(self) -> None:
+        if not self._active:
+            return
+        self._active = False
         self.stops += 1
         print("<stop>")
 
@@ -628,3 +646,87 @@ class TestTurnTimeFooter:
 
         assert last_frame.endswith("1m 41.0s")
         assert capsys.readouterr().out == "[time] 1m 41.0s\n"
+
+
+class TestTextAfterAToolCall:
+    """A turn shaped text -> tool call -> text (PATCH-010-04).
+
+    The model comments before reaching for another tool, so answer text arrives
+    twice in one turn. Observed live on a Tracker search whose first query found
+    nothing: the model said so, then issued a second `issues_find`.
+    """
+
+    def _turn(self, indicator, capsys):
+        call = make_tool_call("sql_query", {"query": "SELECT 1"})
+        responder = ScriptedResponder(
+            [
+                # Text *and* a tool call in one response. This is the shape that
+                # exposes the defect; a response that only calls a tool never
+                # streams text at all, which is why it stayed hidden.
+                ScriptedModelResponse(text="Ничего не нашёл, попробую иначе.",
+                                      tool_calls=[call]),
+                ScriptedModelResponse(text="Вот таблица."),
+            ]
+        )
+        runner = AgentRunner(
+            respond=responder,
+            executor=FakeToolExecutor({"sql_query": lambda arguments: {"ok": True}}),
+            tools=[{"type": "function", "function": {"name": "sql_query"}}],
+            renderer=CliRenderer(indicator),
+            run_id="run-1",
+            max_tool_calls=4,
+            model_request_timeout_seconds=5,
+            tool_execution_timeout_seconds=5,
+            agent_turn_timeout_seconds=30,
+            trace_sink=MemoryTraceSink(),
+        )
+        outcome = runner.run_turn([{"role": "user", "content": "hi"}])
+        return outcome, capsys.readouterr().out.splitlines()
+
+    def test_the_indicator_is_stopped_before_the_second_answer_segment(self, capsys):
+        indicator = MarkerIndicator()
+
+        outcome, lines = self._turn(indicator, capsys)
+
+        assert outcome.status is TurnStatus.COMPLETED
+        assert lines == [
+            "<stop>",
+            "",
+            "Qwen: Ничего не нашёл, попробую иначе.",
+            "[tool 1/4] sql_query",
+            "[args] query=SELECT 1",
+            "<start>",  # tool execution
+            "<stop>",
+            "[result] ok",
+            "<start>",  # the model's next decision
+            # The regression: this stop used to be skipped, because the prefix
+            # had already been printed, and the spinner kept animating over the
+            # answer below it.
+            "<stop>",
+            "Вот таблица.",
+        ]
+        assert indicator.stops == indicator.starts + 1
+
+    def test_the_answer_prefix_is_still_printed_exactly_once(self, capsys):
+        # The fix must not be mistaken for "print `Qwen: ` again": the prefix
+        # contract is per turn and unchanged.
+        _, lines = self._turn(MarkerIndicator(), capsys)
+
+        assert sum(line.startswith("Qwen: ") for line in lines) == 1
+
+    def test_no_frame_reaches_the_terminal_while_the_answer_streams(self, capsys):
+        # The same turn against the real indicator drawing into a fake terminal:
+        # once the answer begins, nothing further may be written to that line.
+        stream = FakeTty()
+        indicator = ActivityIndicator(stream, interval_seconds=0.001)
+        indicator.start()
+
+        self._turn(indicator, capsys)
+        drawn = stream.getvalue()
+        indicator.stop()
+
+        assert indicator.active is False
+        # The last thing written must be an erase, not a frame: the indicator
+        # was stopped for the answer and never resumed behind it.
+        assert drawn.endswith("\r")
+        assert not any(drawn.rstrip("\r ").endswith(frame) for frame in FRAMES)
