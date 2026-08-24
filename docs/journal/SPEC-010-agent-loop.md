@@ -426,8 +426,8 @@ what the model receives and belongs in its own SPEC.
 - **Patch:** [PATCH-010-03](../../patches/SPEC-010/PATCH-010-03-Turn-Elapsed-Time-Display.md)
 - **Date:** 2026-08-24
 - **Branch:** patch/PATCH-010-03-turn-elapsed-time-display
-- **Implementation commit:** `<short-sha>`
-- **Merge commit:** `<short-sha>`
+- **Implementation commit:** `b7797ab`
+- **Merge commit:** `3ebaf9f`
 
 #### Reason
 
