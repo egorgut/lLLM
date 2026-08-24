@@ -17,6 +17,7 @@ Usage:
 
     python -m evals.runner --suite scripted
     python -m evals.runner --suite live
+    python -m evals.runner --suite live --profile next --router-profile fast
 """
 
 import argparse
@@ -45,8 +46,8 @@ from config import (
     SKILLS_ROOT,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
     TRACE_PAYLOAD_PREVIEW_CHARS,
-    ModelProfile,
-    resolve_model_profile,
+    ModelRoles,
+    resolve_model_roles,
 )
 from conversation import Conversation
 from reliability import TurnStatus, new_id
@@ -100,6 +101,11 @@ class CaseResult:
     # the subject of. The remaining fields are what SPEC-018 §7.2 asked to
     # record per profile.
     profile: str | None = None
+    # The router's identity beside the agent's (SPEC-019 §4.10). `profile` keeps
+    # its SPEC-017 meaning -- the primary/agent profile -- so old results stay
+    # readable; these two say which model actually made the routing decision.
+    router_profile: str | None = None
+    router_model: str | None = None
     model_requests: int | None = None
     tool_sequence: list[str] = field(default_factory=list)
     activation_events: list[dict[str, Any]] = field(default_factory=list)
@@ -414,9 +420,13 @@ def _render_live_prompt(template: str) -> str:
 
 
 def run_live_case(
-    case: dict[str, Any], executor, tools, respond, run_id: str, profile: ModelProfile
+    case: dict[str, Any], executor, tools, respond, run_id: str, roles: ModelRoles
 ) -> CaseResult:
     from prompts import SYSTEM_PROMPT
+
+    # A non-skill live case never routes, but it still records both role
+    # identities so every live result is read the same way (SPEC-019 §4.10).
+    profile = roles.agent
 
     runner = AgentRunner(
         respond=respond,
@@ -461,6 +471,8 @@ def run_live_case(
         duration_ms=outcome.duration_ms,
         failures=failures,
         profile=profile.name,
+        router_profile=roles.router.name,
+        router_model=roles.router.model,
         model_requests=outcome.model_requests,
     )
 
@@ -474,7 +486,7 @@ def run_live_skill_case(
     orchestrator: SkillTurnOrchestrator,
     trace: MemoryTraceSink,
     executor,
-    profile: ModelProfile,
+    roles: ModelRoles,
 ) -> CaseResult:
     """One live case through the *real* skill-aware turn (PATCH-018-01).
 
@@ -501,7 +513,9 @@ def run_live_skill_case(
             tool_calls=[],
             duration_ms=0,
             failures=[f"live skill case raised: {error}"],
-            profile=profile.name,
+            profile=roles.agent.name,
+            router_profile=roles.router.name,
+            router_model=roles.router.model,
         )
 
     events = _turn_events(trace, result.outcome.turn_id)
@@ -549,7 +563,9 @@ def run_live_skill_case(
         routing_requests=result.selection.routing_requests,
         final_skill=result.final_skill,
         skill_activations=result.activations,
-        profile=profile.name,
+        profile=roles.agent.name,
+        router_profile=roles.router.name,
+        router_model=roles.router.model,
         model_requests=result.outcome.model_requests,
         tool_sequence=tool_sequence,
         activation_events=activation_events,
@@ -561,8 +577,8 @@ def _build_live_orchestrator(
     registry,
     executor,
     mcp_servers,
-    model,
-    profile: ModelProfile,
+    transports,
+    roles: ModelRoles,
     run_id: str,
     trace: MemoryTraceSink,
     sandbox,
@@ -575,12 +591,17 @@ def _build_live_orchestrator(
     only differences from `app.py:main()` are the ones an eval must have: a
     recording renderer instead of the CLI one, and an in-memory trace sink the
     runner can read the evidence back out of.
+
+    The two model roles come in already resolved and already built by
+    `app.build_model_transports` (SPEC-019 §4.10): a live measurement of a split
+    run is only worth taking if the eval composes the roles the way the
+    application does, so there is no second implementation of that rule here.
     """
 
     from app import omitted_skills
 
     validate_skill_config(
-        skill_routing_timeout_seconds=profile.skill_routing_timeout_seconds,
+        skill_routing_timeout_seconds=roles.router.skill_routing_timeout_seconds,
         skill_routing_repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
         max_skill_routing_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
         max_skill_instruction_chars=MAX_SKILL_INSTRUCTION_CHARS,
@@ -593,8 +614,8 @@ def _build_live_orchestrator(
         SKILLS_ROOT, registry, omit=omitted_skills(mcp_servers, sandbox)
     )
     router = SkillRouter(
-        route=model.text,
-        timeout_seconds=profile.skill_routing_timeout_seconds,
+        route=transports.router.text,
+        timeout_seconds=roles.router.skill_routing_timeout_seconds,
         max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
         repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
         payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
@@ -604,15 +625,15 @@ def _build_live_orchestrator(
         router=router,
         tool_registry=registry,
         executor=executor,
-        respond=model.respond,
+        respond=transports.agent.respond,
         renderer_factory=RecordingRenderer,
         default_tools=registry.to_ollama_tools(),
         run_id=run_id,
         max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
         max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-        model_request_timeout_seconds=profile.model_request_timeout_seconds,
+        model_request_timeout_seconds=roles.agent.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-        agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
+        agent_turn_timeout_seconds=roles.agent.agent_turn_timeout_seconds,
         trace_sink=trace,
         payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
         max_skill_activations=MAX_SKILL_ACTIVATIONS_PER_TURN,
@@ -625,19 +646,24 @@ def _build_live_orchestrator(
     )
 
 
-def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[CaseResult]:
+def _run_live_cases(cases: list[dict[str, Any]], roles: ModelRoles) -> list[CaseResult]:
     # Imported lazily: the live suite is the only path that needs a real
     # Ollama connection, real local tools, and a real MCP server. Keeping this
     # import out of the module top level means the scripted suite (and the
     # rest of the test/import graph) never depends on any of that.
-    from app import build_executor, build_mcp_servers, load_dotenv_if_present, register_mcp_tools
+    from app import (
+        build_executor,
+        build_mcp_servers,
+        build_model_transports,
+        load_dotenv_if_present,
+        register_mcp_tools,
+    )
     from config import (
         PROJECT_ROOT,
         SANDBOX_ARTIFACT_ROOT,
         SANDBOX_TOOL_ENABLED,
         SANDBOX_TURN_TIME_MARGIN_SECONDS,
     )
-    from llm import OllamaModel
     from mcp_integration import McpClientManager, McpStartupError
     from sandbox_tool import build_sandbox_capability
 
@@ -697,15 +723,18 @@ def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[
 
         tools = registry.to_ollama_tools()
 
-        model = OllamaModel.for_profile(profile)
+        # One transport per distinct role profile, built by the application's own
+        # composition helper so a live split run is wired exactly as `app.py`
+        # wires it (SPEC-019 §4.3, §4.10).
+        transports = build_model_transports(roles)
 
         orchestrator = (
             _build_live_orchestrator(
                 registry,
                 recording_executor,
                 mcp_servers,
-                model,
-                profile,
+                transports,
+                roles,
                 run_id,
                 trace,
                 sandbox,
@@ -715,10 +744,10 @@ def _run_live_cases(cases: list[dict[str, Any]], profile: ModelProfile) -> list[
         )
 
         return [
-            run_live_skill_case(case, orchestrator, trace, recording_executor, profile)
+            run_live_skill_case(case, orchestrator, trace, recording_executor, roles)
             if case.get("skill_case")
             else run_live_case(
-                case, recording_executor, tools, model.respond, run_id, profile
+                case, recording_executor, tools, transports.agent.respond, run_id, roles
             )
             for case in cases
         ]
@@ -730,7 +759,7 @@ def run_suite(
     suite: str,
     cases_path: Path,
     category: str | None = None,
-    profile: ModelProfile | None = None,
+    roles: ModelRoles | None = None,
 ) -> tuple[dict[str, int], list[CaseResult]]:
     cases = load_cases(cases_path)
     applicable = [case for case in cases if suite in case.get("modes", ["scripted", "live"])]
@@ -745,7 +774,7 @@ def run_suite(
             for case in applicable
         ]
     elif suite == "live":
-        results = _run_live_cases(applicable, profile or resolve_model_profile())
+        results = _run_live_cases(applicable, roles or resolve_model_roles())
     else:
         raise ValueError(f"Unknown suite: {suite}")
 
@@ -782,6 +811,8 @@ def write_results(
                 "final_skill": result.final_skill,
                 "skill_activations": result.skill_activations,
                 "profile": result.profile,
+                "router_profile": result.router_profile,
+                "router_model": result.router_model,
                 "model_requests": result.model_requests,
                 "tool_calls": result.tool_calls,
                 "tool_sequence": result.tool_sequence,
@@ -797,14 +828,27 @@ def write_results(
     return path
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the lLLM agent evaluation suite.")
     parser.add_argument("--suite", choices=["scripted", "live"], default="scripted")
     parser.add_argument(
         "--profile",
         choices=sorted(MODEL_PROFILES),
         default=None,
-        help="Model profile for the live suite (SPEC-017); ignored by the scripted suite.",
+        help=(
+            "Model profile the agent loop runs on in the live suite (SPEC-017); "
+            "ignored by the scripted suite."
+        ),
+    )
+    parser.add_argument(
+        "--router-profile",
+        choices=sorted(MODEL_PROFILES),
+        default=None,
+        help=(
+            "Optional profile for skill routing only in the live suite "
+            "(SPEC-019); omitted, routing runs on --profile. Ignored by the "
+            "scripted suite."
+        ),
     )
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES_PATH)
     parser.add_argument(
@@ -813,11 +857,21 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Only run cases whose category starts with this prefix (e.g. 'tracker').",
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
-    profile = resolve_model_profile(args.profile)
-    summary, results = run_suite(args.suite, args.cases, args.category, profile)
-    model_name = "scripted" if args.suite == "scripted" else profile.model
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+
+    roles = resolve_model_roles(args.profile, args.router_profile)
+    if args.suite == "live":
+        # The same startup check `app.py` makes, before any case runs: an
+        # incoherent role pair must not be discovered mid-measurement.
+        from app import validate_model_roles
+
+        validate_model_roles(roles)
+    summary, results = run_suite(args.suite, args.cases, args.category, roles)
+    model_name = "scripted" if args.suite == "scripted" else roles.agent.model
     result_path = write_results(args.suite, summary, results, model_name)
 
     for result in results:

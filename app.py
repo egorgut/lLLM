@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from cli_activity import ActivityIndicator
@@ -29,7 +30,8 @@ from config import (
     TRACE_PAYLOAD_PREVIEW_CHARS,
     TRACKER_MCP_SERVER_ID,
     ModelProfile,
-    resolve_model_profile,
+    ModelRoles,
+    resolve_model_roles,
 )
 from conversation import Conversation
 from llm import ModelToolCall, OllamaModel
@@ -275,6 +277,81 @@ def describe_profile(profile: ModelProfile) -> str:
     )
 
 
+@dataclass(frozen=True)
+class ModelTransports:
+    """The transports the two roles of one run talk through (SPEC-019).
+
+    `router is agent` whenever both roles resolved to the same profile, which is
+    the historical path: one `OllamaModel`, one `ollama.Client`, one connection
+    pool. A split run gets two, each bound to its own model and its own profile's
+    client timeout.
+    """
+
+    agent: OllamaModel
+    router: OllamaModel
+
+
+def build_model_transports(roles: ModelRoles) -> ModelTransports:
+    """Build one transport per distinct role profile, reusing when they match.
+
+    The entry point owns this composition (SPEC-019 §4.3): neither `OllamaModel`
+    nor `SkillRouter` nor `AgentRunner` learns that roles exist. Shared with the
+    live evaluation path (`evals/runner.py`) so there is exactly one
+    implementation of the reuse rule.
+    """
+
+    agent = OllamaModel.for_profile(roles.agent)
+    return ModelTransports(
+        agent=agent,
+        router=OllamaModel.for_profile(roles.router) if roles.split else agent,
+    )
+
+
+def describe_model_roles(roles: ModelRoles) -> list[str]:
+    """The startup line(s) naming what this run is talking to, per role.
+
+    A monolithic run keeps SPEC-017's single line verbatim, so the default
+    experience and the committed transcripts do not change, and so the no-override
+    path never suggests two independent models. A split run prints one line per
+    role instead, each naming the profile, the model, and the deadlines that role
+    actually owns -- routing belongs to the router, the whole turn to the agent
+    (SPEC-019 §4.4, §4.8).
+    """
+
+    if not roles.split:
+        return [f"[model] {describe_profile(roles.agent)}"]
+    agent, router = roles.agent, roles.router
+    return [
+        f"[model] agent {agent.name}: {agent.model} "
+        f"(request {agent.model_request_timeout_seconds:g}s, "
+        f"turn {agent.agent_turn_timeout_seconds:g}s)",
+        f"[router] {router.name}: {router.model} "
+        f"(request {router.model_request_timeout_seconds:g}s, "
+        f"routing {router.skill_routing_timeout_seconds:g}s)",
+    ]
+
+
+def run_started_event(run_id: str, roles: ModelRoles) -> dict:
+    """The `run_started` trace event for a run under `roles` (SPEC-019 §4.9).
+
+    `model_name` / `model_profile` keep their SPEC-017 meaning -- the primary,
+    agent-side model -- so an existing trace consumer reads a split run without
+    changing. The router identity is additive, and is emitted on *every* run,
+    monolithic ones included: a consumer should be able to say which model routed
+    without inferring it from a missing field or from CLI arguments it never saw.
+    """
+
+    return build_event(
+        "run_started",
+        run_id=run_id,
+        model_name=roles.agent.model,
+        model_profile=roles.agent.name,
+        router_model_name=roles.router.model,
+        router_model_profile=roles.router.name,
+        app_version=None,
+    )
+
+
 def validate_model_profiles() -> None:
     """Check every committed profile, not just the selected one (SPEC-017 §4.3).
 
@@ -298,6 +375,31 @@ def validate_model_profiles() -> None:
             raise ValueError(f"Model profile '{name}' is invalid: {error}") from error
 
 
+def validate_model_roles(roles: ModelRoles) -> None:
+    """Check the selected *pair*, not just each profile on its own (SPEC-019 §4.5).
+
+    Every committed profile is coherent by itself, but mixing two of them can
+    still produce an incoherent run, and only one cross-role rule is needed to
+    preserve the existing shared-deadline contract: routing must be able to finish
+    inside the whole-turn budget it spends from. `SkillRouter` clamps its own
+    component deadline to the time the turn has left
+    (`min(self._timeout_seconds, remaining)`), so a router routing timeout at or
+    above the agent's turn timeout would silently hand the bound to the turn
+    budget -- routing would never fail as routing, it would just consume the turn.
+
+    Deliberately no further role-specific policy: this is not the place to invent
+    rules the single-profile configuration never had.
+    """
+
+    if roles.router.skill_routing_timeout_seconds >= roles.agent.agent_turn_timeout_seconds:
+        raise ValueError(
+            f"Router profile '{roles.router.name}' routes for up to "
+            f"{roles.router.skill_routing_timeout_seconds:g}s, which does not fit "
+            f"inside agent profile '{roles.agent.name}''s whole-turn budget of "
+            f"{roles.agent.agent_turn_timeout_seconds:g}s."
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local AI chat.")
     parser.add_argument(
@@ -306,7 +408,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Model profile to run under: which model, and the deadlines that "
-            "model needs (SPEC-017). Defaults to the host default profile."
+            "model needs (SPEC-017). Defaults to the host default profile, and "
+            "remains the profile the agent loop runs on."
+        ),
+    )
+    parser.add_argument(
+        "--router-profile",
+        choices=sorted(MODEL_PROFILES),
+        default=None,
+        help=(
+            "Optional profile for skill routing only (SPEC-019). Omitted, skill "
+            "routing runs on the same profile as the agent, exactly as before."
         ),
     )
     return parser.parse_args(argv)
@@ -314,11 +426,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    # The profile is resolved before anything else: it decides which model runs
-    # and which deadlines bound it, and an unknown name must never reach the
-    # chat loop (SPEC-017 §4.3).
+    # The profiles are resolved before anything else: they decide which models run
+    # and which deadlines bound them, and an unknown name must never reach the
+    # chat loop (SPEC-017 §4.3). `--router-profile` splits skill routing off onto
+    # its own profile; omitted, both roles are the same profile and the same
+    # transport, exactly as before (SPEC-019 §4.1).
     validate_model_profiles()
-    profile = resolve_model_profile(args.profile)
+    roles = resolve_model_roles(args.profile, args.router_profile)
+    validate_model_roles(roles)
 
     # Fill any gaps in the process environment from a local `.env` before
     # anything (e.g. Tracker's config loader) reads it. Real exported
@@ -335,15 +450,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     trace_sink = SafeTraceSink(sink, run_id)
     run_started_at = time.monotonic()
-    trace_sink.emit(
-        build_event(
-            "run_started",
-            run_id=run_id,
-            model_name=profile.model,
-            model_profile=profile.name,
-            app_version=None,
-        )
-    )
+    trace_sink.emit(run_started_event(run_id, roles))
 
     store = JsonConversationStore(CHAT_HISTORY_PATH)
     conversation = Conversation(messages=store.load())
@@ -399,7 +506,7 @@ def main(argv: list[str] | None = None) -> None:
         # to an unavailable tool is a fail-fast startup error, not a turn-time
         # event (SPEC-012 §15). The surrounding `finally` still closes MCP.
         validate_skill_config(
-            skill_routing_timeout_seconds=profile.skill_routing_timeout_seconds,
+            skill_routing_timeout_seconds=roles.router.skill_routing_timeout_seconds,
             skill_routing_repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
             max_skill_routing_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
             max_skill_instruction_chars=MAX_SKILL_INSTRUCTION_CHARS,
@@ -415,15 +522,15 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Application startup failed: {error}")
             raise SystemExit(1)
 
-        # The transport is built here from the profile and injected, rather than
-        # read from a module-level constant at import time (SPEC-017 §4.4). The
-        # router and the agent loop share it, so both always speak to the same
-        # model under the same client timeout.
-        model = OllamaModel.for_profile(profile)
+        # The transports are built here from the profiles and injected, rather
+        # than read from a module-level constant at import time (SPEC-017 §4.4).
+        # One per distinct role profile: the router and the agent loop share a
+        # single object whenever they resolved to the same profile (SPEC-019 §4.3).
+        transports = build_model_transports(roles)
 
         router = SkillRouter(
-            route=model.text,
-            timeout_seconds=profile.skill_routing_timeout_seconds,
+            route=transports.router.text,
+            timeout_seconds=roles.router.skill_routing_timeout_seconds,
             max_response_chars=MAX_SKILL_ROUTING_RESPONSE_CHARS,
             repair_attempts=SKILL_ROUTING_REPAIR_ATTEMPTS,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
@@ -459,15 +566,15 @@ def main(argv: list[str] | None = None) -> None:
             router=router,
             tool_registry=registry,
             executor=executor,
-            respond=model.respond,
+            respond=transports.agent.respond,
             renderer_factory=lambda: CliRenderer(indicator),
             default_tools=tools,
             run_id=run_id,
             max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
             max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
-            model_request_timeout_seconds=profile.model_request_timeout_seconds,
+            model_request_timeout_seconds=roles.agent.model_request_timeout_seconds,
             tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
-            agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
+            agent_turn_timeout_seconds=roles.agent.agent_turn_timeout_seconds,
             trace_sink=trace_sink,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
             on_selection=announce_skill,
@@ -485,7 +592,8 @@ def main(argv: list[str] | None = None) -> None:
             ),
         )
 
-        print(f"[model] {describe_profile(profile)}")
+        for line in describe_model_roles(roles):
+            print(line)
         for summary in manager.server_summaries():
             print(f"[mcp] {summary}")
         print(sandbox_diagnostic)
