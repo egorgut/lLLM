@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from cli_activity import ActivityIndicator
+from cli_activity import ActivityIndicator, format_turn_time
 from config import (
     CHAT_HISTORY_PATH,
     MAX_IDENTICAL_TOOL_CALLS,
@@ -264,6 +264,22 @@ def _rollback_artifacts(sandbox: SandboxCapability | None) -> None:
         sandbox.workspace.rollback()
     except Exception:  # noqa: BLE001 - cleanup must not mask the turn's outcome
         pass
+
+
+def print_turn_time(indicator: ActivityIndicator, seconds: float) -> None:
+    """Report what the finished turn cost, on an interactive terminal only.
+
+    Gated on the indicator's own TTY detection rather than a second `isatty`
+    check, so there is exactly one rule in the CLI about who sees transient
+    timing. That gate is the point: a wall-clock duration differs on every run,
+    and PATCH-010-01 promised non-TTY stdout not a single byte so that the
+    transcripts committed to `README.md` and the journals stay byte-for-byte
+    reproducible. Printing it into piped output would break the guarantee this
+    patch is built to preserve (PATCH-010-03).
+    """
+
+    if indicator.enabled:
+        print(format_turn_time(seconds))
 
 
 def describe_profile(profile: ModelProfile) -> str:
@@ -635,6 +651,13 @@ def main(argv: list[str] | None = None) -> None:
             # messages are never added to the conversation.
             conversation.add_user_message(user_message)
 
+            # One clock for the whole wait, stamped here rather than read off
+            # `outcome.duration_ms` (PATCH-010-03): it covers exactly what the
+            # user sat through -- routing, every model decision, every tool -- it
+            # shares its origin with the indicator's own counter so the two
+            # cannot disagree, and it still exists on the one path below that has
+            # no outcome at all.
+            turn_started = time.monotonic()
             try:
                 # The indicator covers every silent stretch of the turn and is
                 # always cleared on the way out -- controlled error, timeout,
@@ -650,10 +673,12 @@ def main(argv: list[str] | None = None) -> None:
                     "\nApplication error: Unexpected application error.\n"
                     f"Run ID: {run_id}\n"
                 )
+                print_turn_time(indicator, time.monotonic() - turn_started)
                 _rollback_artifacts(sandbox)
                 conversation.remove_last_message()
                 continue
 
+            turn_seconds = time.monotonic() - turn_started
             outcome = result.outcome
             # Only a completed turn persists; every other outcome (including any
             # routing failure) rolls back the tentative user message. Sandbox
@@ -664,6 +689,10 @@ def main(argv: list[str] | None = None) -> None:
                     sandbox.workspace.commit()
                 conversation.add_assistant_message(outcome.final_text)
                 store.save(conversation.stored_messages)
+                # The final answer is streamed without a trailing newline, so
+                # terminate it before the footer below; every other branch
+                # already ends on a clean line.
+                print()
             elif outcome.status is TurnStatus.CANCELLED:
                 print(f"\n{outcome.error_message}\nRun ID: {outcome.turn_id}\n")
                 _rollback_artifacts(sandbox)
@@ -676,6 +705,9 @@ def main(argv: list[str] | None = None) -> None:
                 _rollback_artifacts(sandbox)
                 conversation.remove_last_message()
 
+            # Every outcome gets the footer, not just a successful one: a turn
+            # that timed out is precisely the one whose duration is worth seeing.
+            print_turn_time(indicator, turn_seconds)
             print("\n")
     finally:
         # Runs on /bye, EOF, Ctrl+C, normal completion, MCP startup failure, and
