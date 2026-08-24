@@ -659,6 +659,7 @@ def _run_live_cases(cases: list[dict[str, Any]], roles: ModelRoles) -> list[Case
         register_mcp_tools,
     )
     from config import (
+        MCP_LOG_DIR,
         PROJECT_ROOT,
         SANDBOX_ARTIFACT_ROOT,
         SANDBOX_TOOL_ENABLED,
@@ -701,6 +702,9 @@ def _run_live_cases(cases: list[dict[str, Any]], roles: ModelRoles) -> list[Case
         call_timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
         run_id=run_id,
         trace_sink=NullTraceSink(),
+        # Same composition as app.py (PATCH-009-01): a live eval's own output is
+        # the measurement, so child logging belongs in a file here too.
+        log_dir=MCP_LOG_DIR,
     )
 
     try:

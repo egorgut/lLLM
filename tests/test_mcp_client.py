@@ -1,4 +1,4 @@
-"""`McpClientManager` lifecycle and admission tests (SPEC-013).
+"""`McpClientManager` lifecycle and admission tests (SPEC-013, PATCH-009-01).
 
 Exercises the manager end-to-end -- launch, discovery, admission filtering,
 routing, calls, and shutdown -- against a fake stdio transport and session
@@ -6,10 +6,11 @@ routing, calls, and shutdown -- against a fake stdio transport and session
 """
 
 import json
+import sys
 
 import pytest
 
-from mcp_integration.client import McpClientManager, McpStartupError
+from mcp_integration.client import McpClientManager, McpStartupError, mcp_log_path
 from mcp_integration.config import McpServerConfig
 from tests.support_mcp import FakeCallToolResult, FakeMcpEnvironment, FakeMcpTool
 from tracing import MemoryTraceSink
@@ -287,3 +288,106 @@ class TestTracing:
 
         dumped = json.dumps(sink.events)
         assert fake_token not in dumped
+
+
+class TestChildLogging:
+    """Where a child server's own stderr goes (PATCH-009-01).
+
+    The SDK's `stdio_client(server, errlog=sys.stderr)` puts it on this
+    process's terminal by default, where the MCP server's per-request `INFO`
+    logging collides with the CLI's own output and its activity indicator.
+    """
+
+    def _env_with_two_servers(self, monkeypatch):
+        env = FakeMcpEnvironment(monkeypatch)
+        time_cfg, tracker_cfg = _time_like_config(), _tracker_like_config()
+        env.register(time_cfg.command, time_cfg.args, tools=[FakeMcpTool("get_current_time")])
+        env.register(tracker_cfg.command, tracker_cfg.args, tools=_APPROVED_TOOLS)
+        return env, {"time": time_cfg, "tracker": tracker_cfg}
+
+    def test_every_child_is_pointed_at_the_runs_log_file(self, monkeypatch, tmp_path):
+        env, servers = self._env_with_two_servers(monkeypatch)
+        manager = McpClientManager(servers, run_id="test-run", log_dir=tmp_path)
+
+        try:
+            manager.start()
+            expected = mcp_log_path(tmp_path, "test-run")
+            assert len(env.errlogs) == 2
+            for errlog in env.errlogs:
+                assert errlog is not sys.stderr
+                assert errlog.name == str(expected)
+            # Both children share one handle: one file per run, not per server.
+            assert env.errlogs[0] is env.errlogs[1]
+        finally:
+            manager.close()
+
+    def test_the_log_file_is_created_under_the_configured_directory(
+        self, monkeypatch, tmp_path
+    ):
+        env, servers = self._env_with_two_servers(monkeypatch)
+        manager = McpClientManager(servers, run_id="test-run", log_dir=tmp_path / "mcp")
+
+        try:
+            manager.start()
+            assert manager.log_path == tmp_path / "mcp" / "mcp-test-run.log"
+            assert manager.log_path.is_file()
+        finally:
+            manager.close()
+
+    def test_without_a_log_directory_children_still_inherit_stderr(
+        self, monkeypatch
+    ):
+        # The parameter is additive: an existing caller that does not pass it
+        # keeps the SDK's historical behaviour exactly.
+        env, servers = self._env_with_two_servers(monkeypatch)
+        manager = McpClientManager(servers, run_id="test-run")
+
+        try:
+            manager.start()
+            assert env.errlogs == [sys.stderr, sys.stderr]
+            assert manager.log_path is None
+        finally:
+            manager.close()
+
+    def test_close_releases_the_log_handle(self, monkeypatch, tmp_path):
+        env, servers = self._env_with_two_servers(monkeypatch)
+        manager = McpClientManager(servers, run_id="test-run", log_dir=tmp_path)
+        manager.start()
+        handle = env.errlogs[0]
+
+        manager.close()
+
+        assert handle.closed is True
+
+    def test_a_failed_startup_still_releases_the_log_handle(self, monkeypatch, tmp_path):
+        # start() tears down what it managed to build; the log handle is part of
+        # that, including on the path where the loop never came up.
+        env = FakeMcpEnvironment(monkeypatch)
+        tracker_cfg = _tracker_like_config()
+        env.register(tracker_cfg.command, tracker_cfg.args, tools=_APPROVED_TOOLS,
+                     fail_initialize=True)
+        manager = McpClientManager({"tracker": tracker_cfg}, run_id="test-run",
+                                   log_dir=tmp_path)
+
+        with pytest.raises(McpStartupError):
+            manager.start()
+        handle = env.errlogs[0]
+        manager.close()
+
+        assert handle.closed is True
+
+    def test_an_unwritable_log_directory_falls_back_to_stderr(
+        self, monkeypatch, tmp_path
+    ):
+        # Logging is not worth refusing to start over: noisy but working beats
+        # not working. The fallback is exactly the historical behaviour.
+        env, servers = self._env_with_two_servers(monkeypatch)
+        blocked = tmp_path / "blocked"
+        blocked.write_text("not a directory", encoding="utf-8")
+        manager = McpClientManager(servers, run_id="test-run", log_dir=blocked)
+
+        try:
+            manager.start()
+            assert env.errlogs == [sys.stderr, sys.stderr]
+        finally:
+            manager.close()

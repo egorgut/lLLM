@@ -23,7 +23,8 @@ import threading
 import time
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TextIO
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -42,6 +43,18 @@ if TYPE_CHECKING:
 _STARTUP_TIMEOUT = 30.0
 _DEFAULT_CALL_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 10.0
+
+
+def mcp_log_path(directory: str | Path, run_id: str) -> Path:
+    """Where this run's MCP children write their own stderr (PATCH-009-01).
+
+    One file per run rather than one growing shared file, for the same reasons
+    PATCH-011-01 gave for traces: two concurrent processes never append to the
+    same path, and correlating a run means picking a file rather than filtering
+    one.
+    """
+
+    return Path(directory) / f"mcp-{run_id}.log"
 
 
 class McpStartupError(Exception):
@@ -65,6 +78,7 @@ class McpClientManager:
         *,
         run_id: str,
         trace_sink: TraceSink = NullTraceSink(),
+        log_dir: str | Path | None = None,
     ) -> None:
         self._servers_config = servers_config
         self._call_timeout = call_timeout
@@ -72,6 +86,11 @@ class McpClientManager:
         self._trace = SafeTraceSink(trace_sink, run_id)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        # Where child stderr goes. `None` keeps the SDK's historical default --
+        # this process's stderr -- so the parameter is purely additive and an
+        # existing caller that does not pass it behaves exactly as before.
+        self._log_dir = log_dir
+        self._errlog: TextIO | None = None
 
         # All of the following are only mutated on the loop thread.
         self._sessions: dict[str, ClientSession] = {}
@@ -86,12 +105,56 @@ class McpClientManager:
 
     # -- lifecycle -----------------------------------------------------------
 
+    @property
+    def log_path(self) -> Path | None:
+        """This run's MCP log file, or ``None`` when children inherit stderr.
+
+        Exposed so the entry point can name it in the otherwise deliberately
+        anonymous startup-failure message (SPEC-009 keeps tracebacks, paths, and
+        raw stderr out of `McpStartupError` itself). A location is not content.
+        """
+
+        if self._log_dir is None:
+            return None
+        return mcp_log_path(self._log_dir, self._run_id)
+
+    def _open_errlog(self) -> None:
+        """Open this run's log file, if one is configured. Never fatal.
+
+        A log destination that cannot be opened must not stop the chat: the
+        fallback is the historical behaviour (child output on stderr), which is
+        noisy but working, and strictly better than refusing to start over a
+        logging concern.
+        """
+
+        path = self.log_path
+        if path is None or self._errlog is not None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._errlog = path.open("a", encoding="utf-8", buffering=1)
+        except OSError:
+            self._errlog = None
+
+    def _child_errlog(self) -> TextIO:
+        return self._errlog if self._errlog is not None else sys.stderr
+
+    def _close_errlog(self) -> None:
+        errlog, self._errlog = self._errlog, None
+        if errlog is None:
+            return
+        try:
+            errlog.close()
+        except OSError:  # pragma: no cover - closing a local file rarely fails
+            pass
+
     def start(self) -> None:
         """Launch every configured server, discover its tools, and register them.
 
         Fail-fast: raises ``McpStartupError`` (after cleaning up) on any failure.
         """
 
+        self._open_errlog()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop, name="mcp-loop", daemon=True
@@ -241,7 +304,10 @@ class McpClientManager:
 
         self._serve_tasks.append(asyncio.current_task())  # type: ignore[arg-type]
         try:
-            async with stdio_client(params) as (read_stream, write_stream):
+            async with stdio_client(params, errlog=self._child_errlog()) as (
+                read_stream,
+                write_stream,
+            ):
                 async with ClientSession(read_stream, write_stream) as session:
                     try:
                         await session.initialize()
@@ -290,6 +356,9 @@ class McpClientManager:
 
         loop = self._loop
         if loop is None:
+            # start() may have failed before the loop existed, or close() may be
+            # running twice; either way the log handle is ours to release.
+            self._close_errlog()
             return
         self._loop = None  # further call_tool() invocations now report closed.
 
@@ -305,6 +374,9 @@ class McpClientManager:
         if self._thread is not None:
             self._thread.join(timeout=_SHUTDOWN_TIMEOUT + 1.0)
             self._thread = None
+
+        # Last: every child is reaped by now, so nothing can still be writing.
+        self._close_errlog()
 
     async def _shutdown_all(self) -> None:
         for event in self._shutdowns.values():
