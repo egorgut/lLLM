@@ -228,8 +228,8 @@ shutdown with no orphan process, and semantic-only history.
 - **Patch:** [PATCH-009-01](../../patches/SPEC-009/PATCH-009-01-Redirect-MCP-Child-Logging.md)
 - **Date:** 2026-08-24
 - **Branch:** patch/PATCH-009-01-redirect-mcp-child-logging
-- **Implementation commit:** `<short-sha>`
-- **Merge commit:** `<short-sha>`
+- **Implementation commit:** `4d25d86`
+- **Merge commit:** `291b001`
 
 #### Reason
 
