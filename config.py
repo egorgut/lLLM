@@ -66,6 +66,47 @@ def resolve_model_profile(name: str | None = None) -> ModelProfile:
         raise ValueError(f"Unknown model profile '{name}'. Valid profiles: {valid}.") from None
 
 
+# Component-specific model roles (SPEC-019). One run resolves two of the profiles
+# above: the one the agent loop decides with, and the one skill routing classifies
+# with. They are the same object unless the host asks for a split, which is why
+# the historical single-profile path is preserved exactly rather than emulated.
+#
+# This is deliberately not a second profile type and not a generic
+# "role -> profile" registry (SPEC-019 §5): it names the two model call sites the
+# runtime actually has -- `SkillRouter.route` and `AgentRunner.respond` -- and
+# nothing else. Like a profile, it is host-owned and fixed for the whole run.
+@dataclass(frozen=True)
+class ModelRoles:
+    agent: ModelProfile
+    router: ModelProfile
+
+    @property
+    def split(self) -> bool:
+        """Whether the two roles resolved to different profiles.
+
+        Identity, not equality: `MODEL_PROFILES` hands out the same frozen object
+        for a given name, so `--profile next --router-profile next` collapses back
+        to one role and one transport.
+        """
+
+        return self.router is not self.agent
+
+
+def resolve_model_roles(agent: str | None = None, router: str | None = None) -> ModelRoles:
+    """The two roles this run runs under; `None` router means "same as the agent".
+
+    `--profile` stays authoritative for the agent role, so omitting the router
+    override reproduces SPEC-017 behavior exactly. Both names go through
+    `resolve_model_profile`, so an unknown one fails here, before the chat loop.
+    """
+
+    agent_profile = resolve_model_profile(agent)
+    return ModelRoles(
+        agent=agent_profile,
+        router=agent_profile if router is None else resolve_model_profile(router),
+    )
+
+
 # Maximum number of stored messages sent to the model on each turn.
 # The full history is persisted on disk; only this window reaches the LLM.
 MAX_CONTEXT_MESSAGES = 20

@@ -1,4 +1,16 @@
-from evals.runner import DEFAULT_CASES_PATH, evaluate_expectation, load_cases, run_suite
+import json
+
+import pytest
+
+from evals.runner import (
+    DEFAULT_CASES_PATH,
+    CaseResult,
+    evaluate_expectation,
+    load_cases,
+    parse_args,
+    run_suite,
+    write_results,
+)
 from reliability import AgentTurnOutcome, TerminationReason, TurnStatus
 
 
@@ -217,3 +229,59 @@ class TestScriptedSuiteRuns:
         # run in the scripted suite even though they're absent from "live".
         assert "repetition-guard-001" in ids
         assert "timeout-scripted-001" in ids
+
+
+class TestLiveRoleSelection:
+    """The live suite's two model roles (SPEC-019 §4.2, §4.10)."""
+
+    def test_the_live_cli_accepts_the_same_override_as_the_app(self):
+        args = parse_args(["--suite", "live", "--profile", "next", "--router-profile", "fast"])
+
+        assert args.profile == "next"
+        assert args.router_profile == "fast"
+
+    def test_omitting_the_override_leaves_the_router_unset(self):
+        assert parse_args(["--suite", "live", "--profile", "next"]).router_profile is None
+
+    def test_an_unknown_router_profile_never_starts_a_run(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--suite", "live", "--router-profile", "huge"])
+
+    def test_scripted_suite_ignores_both_profile_flags(self):
+        # The scripted suite never contacts a model and is pinned to
+        # SCRIPTED_PROFILE, so neither flag may change its results.
+        baseline, _ = run_suite("scripted", DEFAULT_CASES_PATH)
+        from config import resolve_model_roles
+
+        split, _ = run_suite(
+            "scripted", DEFAULT_CASES_PATH, None, resolve_model_roles("next", "fast")
+        )
+
+        assert split == baseline
+        assert split["failed"] == 0
+
+    def test_results_serialize_both_role_identities(self, tmp_path, monkeypatch):
+        import evals.runner as runner
+
+        monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path)
+        result = CaseResult(
+            id="skill-live-sales-001",
+            passed=True,
+            status="completed",
+            reason="final_answer",
+            tool_calls=["sql_query"],
+            duration_ms=1234,
+            profile="next",
+            router_profile="fast",
+            router_model="qwen3:8b",
+        )
+
+        path = write_results("live", {"total": 1, "passed": 1, "failed": 0}, [result], "qwen3.8:27b")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+
+        # The agent identity keeps its existing home, so an old reader is
+        # unaffected; the router identity is additive beside it.
+        assert payload["model"] == "qwen3.8:27b"
+        assert payload["cases"][0]["profile"] == "next"
+        assert payload["cases"][0]["router_profile"] == "fast"
+        assert payload["cases"][0]["router_model"] == "qwen3:8b"

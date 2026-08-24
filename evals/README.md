@@ -31,7 +31,15 @@ purpose isn't something the eval should require of a real model.
 python -m evals.runner --suite scripted   # default; no Ollama, no MCP server, no DB
 python -m evals.runner --suite live       # optional; needs Ollama + MCP running
 python -m evals.runner --suite live --profile deep --category skill_live
+python -m evals.runner --suite live --profile next --router-profile fast
 ```
+
+`--profile` selects the profile the agent loop runs on; `--router-profile`
+(SPEC-019) optionally moves skill routing onto a different one, so a comparison
+can hold the routing model fixed while changing only the model doing the work.
+Omitted, both roles share one profile and one transport. Each live result records
+`profile` (the agent) beside `router_profile` / `router_model`. Both flags are
+ignored by the scripted suite, which stays pinned to `SCRIPTED_PROFILE`.
 
 A case marked `skill_case: true` runs through the real `SkillTurnOrchestrator`
 rather than a raw `AgentRunner` — the router selects a skill, the tool view is
