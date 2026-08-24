@@ -559,8 +559,8 @@ measurement available and left the rest deferred.
 - **Patch:** [PATCH-010-04](../../patches/SPEC-010/PATCH-010-04-Stop-Indicator-On-Every-Answer-Segment.md)
 - **Date:** 2026-08-24
 - **Branch:** patch/PATCH-010-04-stop-indicator-on-every-answer-segment
-- **Implementation commit:** `<short-sha>`
-- **Merge commit:** `<short-sha>`
+- **Implementation commit:** `f3c2cd0`
+- **Merge commit:** `3993e3b`
 
 #### Reason
 
