@@ -4,8 +4,8 @@
 - **Parent spec:** [SPEC-019](../../../specs/SPEC-019-Component-Specific-Model-Profiles.md)
 - **Date:** 2026-08-25
 - **Branch:** patch/PATCH-019-01-evaluate-qwen38-27b-mlx-runtime
-- **Implementation commit:** `<pending>`
-- **Merge commit:** `<pending>`
+- **Implementation commit:** `3791c70`
+- **Merge commit:** `d8bb156`
 
 ## Hypothesis / intent
 
