@@ -246,6 +246,18 @@ What is established is *"the split works"*. What is **not** established is
 *"`fast` is the right default router"* — `DEFAULT_MODEL_PROFILE` stays `fast` for
 both roles, and split routing stays opt-in.
 
+## Patches
+
+- `PATCH-019-01` — evaluates `qwen3.8:27b-mlx` as an agent runtime by adding one
+  experimental profile, `next-mlx`, and holding the router on `fast` — the first
+  use of SPEC-019's split for its intended purpose, changing only the agent role.
+  The candidate won every measurement (1.9-4.0x warm throughput, 2.2-6.4x faster
+  live medians, 10/10 live cases against the baseline's 8/9), but the two Ollama
+  packages differ in quantization, format, parameter count, and projector
+  packaging, so no engine claim is available. Conclusion: **keep experimental**,
+  no default change.
+  See [`docs/journal/patches/PATCH-019-01-evaluate-qwen38-27b-mlx-runtime.md`](patches/PATCH-019-01-evaluate-qwen38-27b-mlx-runtime.md).
+
 ## Follow-ups
 
 - Run SPEC-019 §7.3 (`next/next` vs `fast/next` on the model-routed live cases:

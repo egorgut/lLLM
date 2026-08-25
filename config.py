@@ -45,6 +45,15 @@ MODEL_PROFILES = {
     # count. Carrying the same ~2.5-3x margin the other profiles apply to a
     # four-call turn (4.3 + 4x33 + 65 ~= 201 s) gives 500 s.
     "next": ModelProfile("next", "qwen3.8:27b", 250, 500, 50),
+    # PATCH-019-01. Experimental, and neither a rung nor a candidate default: the
+    # same model family as `next` shipped as a *different Ollama package* --
+    # safetensors / nvfp4 / 27.8B with a fused projector, against `next`'s gguf /
+    # Q4_K_M / 27.3B plus a separate CLIP projector and a packaged
+    # `draft_num_predict 4`. Anything measured between the two is therefore a
+    # comparison of two deployable packages, never of an inference engine alone.
+    # The deadlines are *copied* from `next` deliberately and are not measured for
+    # this package, so timeout policy does not become a second variable.
+    "next-mlx": ModelProfile("next-mlx", "qwen3.8:27b-mlx", 250, 500, 50),
 }
 DEFAULT_MODEL_PROFILE = "fast"
 

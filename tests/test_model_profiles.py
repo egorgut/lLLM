@@ -70,6 +70,25 @@ class TestCommittedProfiles:
         assert MODEL_PROFILES["next"].model == "qwen3.8:27b"
         assert resolve_model_profile() is MODEL_PROFILES["fast"]
 
+    def test_next_mlx_profile_binds_the_mlx_package_with_next_deadlines(self):
+        # PATCH-019-01 pins only what the patch claims: the experimental profile
+        # binds the MLX-backed package, and copies `next`'s deadlines rather than
+        # measuring its own so that timeout policy is not a second variable in the
+        # comparison. Adding it did not move the host default either.
+        base, mlx = MODEL_PROFILES["next"], MODEL_PROFILES["next-mlx"]
+        assert mlx.model == "qwen3.8:27b-mlx"
+        assert base.model == "qwen3.8:27b"
+        assert (
+            mlx.model_request_timeout_seconds,
+            mlx.agent_turn_timeout_seconds,
+            mlx.skill_routing_timeout_seconds,
+        ) == (
+            base.model_request_timeout_seconds,
+            base.agent_turn_timeout_seconds,
+            base.skill_routing_timeout_seconds,
+        )
+        assert resolve_model_profile() is MODEL_PROFILES["fast"]
+
     def test_every_committed_profile_is_internally_coherent(self):
         # The same host-owned rules SPEC-011 §10 applies to one configuration.
         validate_model_profiles()
