@@ -3,8 +3,8 @@
 - **Spec:** [SPEC-020](../../specs/SPEC-020-Reasoning-Aware-Agent-Turn.md)
 - **Date:** 2026-08-26
 - **Branch:** feature/SPEC-020-reasoning-aware-agent-turn
-- **Implementation commit:** _(filled in after merge)_
-- **Merge commit:** _(filled in after merge)_
+- **Implementation commit:** `557515a`
+- **Merge commit:** `00f8125`
 
 ## Hypothesis / intent
 
