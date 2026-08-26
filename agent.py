@@ -13,6 +13,13 @@ of that, every turn now:
 - returns one explicit `AgentTurnOutcome` instead of a bare string or an
   undifferentiated exception (SPEC-011 §"Core architectural decisions" #1).
 
+SPEC-020 adds one more: the model's hidden reasoning is no longer discarded.
+Within one active turn it is captured separately from user-visible content,
+attached to the transient assistant tool-call message, and handed back to the
+next model decision — then dropped with the rest of the working transcript when
+the turn ends. It never reaches the renderer, the conversation, or the trace as
+text.
+
 SPEC-018 adds one general notion on top: a *control tool* — a tool the host
 handles itself, because handling it changes the turn's own view (its tool
 declarations, its executor, its system-level block). The loop knows only that
@@ -33,7 +40,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from llm import ModelToolCall
+from llm import ModelResponseMetrics, ModelStreamChunk, ModelToolCall
 from reliability import (
     STATUS_BY_REASON,
     USER_MESSAGE_BY_REASON,
@@ -60,14 +67,19 @@ class ModelResponseLike(Protocol):
     """The slice of :class:`llm.ModelResponse` the loop depends on.
 
     Declared as a Protocol so tests can inject a scripted response with no live
-    Ollama. ``text_chunks()`` streams assistant text as it arrives; ``tool_calls``
-    is authoritative once the stream has been consumed.
+    Ollama. ``chunks()`` streams reasoning and assistant text as they arrive, kept
+    apart; ``tool_calls`` is authoritative once the stream has been consumed;
+    ``metrics`` is the transport's own timing metadata, or ``None`` when the
+    stream ended before Ollama reported any.
     """
 
-    def text_chunks(self) -> Iterator[str]: ...
+    def chunks(self) -> Iterator[ModelStreamChunk]: ...
 
     @property
     def tool_calls(self) -> list[ModelToolCall]: ...
+
+    @property
+    def metrics(self) -> ModelResponseMetrics | None: ...
 
 
 class Renderer(Protocol):
@@ -116,17 +128,27 @@ class ControlToolHandler(Protocol):
     def handle(self, name: str, arguments: dict[str, Any]) -> ControlResult: ...
 
 
-def assistant_tool_message(call: ModelToolCall) -> dict:
+def assistant_tool_message(call: ModelToolCall, thinking: str = "") -> dict:
     """The temporary assistant message that records a tool call for the model.
 
     Part of the ephemeral per-turn transcript only; it is never persisted.
+
+    When the decision that produced this call also produced reasoning, that
+    reasoning rides along on the same message (SPEC-020 §4.5) — the installed
+    Ollama SDK already models an assistant message that way, so this needs no
+    second memory mechanism and no hidden message type. Empty reasoning is
+    omitted entirely rather than sent as an empty field, so a non-thinking model
+    produces exactly the transcript it produced before SPEC-020.
     """
 
-    return {
+    message = {
         "role": "assistant",
         "content": "",
         "tool_calls": [{"function": {"name": call.name, "arguments": call.arguments}}],
     }
+    if thinking:
+        message["thinking"] = thinking
+    return message
 
 
 def tool_result_message(call: ModelToolCall, result: dict) -> dict:
@@ -140,6 +162,71 @@ def tool_result_message(call: ModelToolCall, result: dict) -> dict:
         "tool_name": call.name,
         "content": json.dumps(result, ensure_ascii=False),
     }
+
+
+@dataclass(frozen=True)
+class _ModelDecision:
+    """What one consumed model response amounted to, for the loop's own use.
+
+    Deliberately internal: `thinking` is transient turn state, and exposing it
+    through `AgentTurnOutcome` would make it the caller's problem to remember not
+    to persist. The loop is the only thing that ever sees it.
+
+    Every ``*_ms`` field is measured from the same origin as the request's own
+    ``duration_ms``, so the two are directly comparable. ``None`` means "that
+    never happened in this response" — a model that emitted no reasoning has no
+    `first_thinking_ms`, one that went straight to a tool call has no
+    `first_content_ms`.
+    """
+
+    text: str
+    thinking: str
+    tool_calls: list[ModelToolCall]
+    first_model_output_ms: int | None = None
+    first_thinking_ms: int | None = None
+    first_content_ms: int | None = None
+    first_tool_call_ms: int | None = None
+    metrics: ModelResponseMetrics | None = None
+
+    @property
+    def visible_ttft_ms(self) -> int | None:
+        """Request start -> the first thing the harness could *show* as output.
+
+        The number the user actually experiences as "time to first token", which
+        is not the same as the model starting to generate: hidden reasoning is
+        model output the terminal never renders. Keeping the two apart is the
+        whole point of SPEC-020 §4.9 — an 18 s silence is a different problem
+        depending on which of them it was.
+        """
+
+        candidates = [
+            value
+            for value in (self.first_content_ms, self.first_tool_call_ms)
+            if value is not None
+        ]
+        return min(candidates) if candidates else None
+
+    def trace_fields(self) -> dict[str, Any]:
+        """The additive reasoning/latency fields for `model_response_finished`.
+
+        Counts and timings only. The reasoning text never appears here, and
+        neither does a preview or a hash of it (SPEC-020 §4.11): a digest of a
+        short chain of thought is not much of a secret.
+        """
+
+        return {
+            "thinking_chars": len(self.thinking),
+            "first_model_output_ms": self.first_model_output_ms,
+            "first_thinking_ms": self.first_thinking_ms,
+            "first_content_ms": self.first_content_ms,
+            "first_tool_call_ms": self.first_tool_call_ms,
+            "visible_ttft_ms": self.visible_ttft_ms,
+            **(
+                self.metrics.as_trace_fields()
+                if self.metrics is not None
+                else ModelResponseMetrics().as_trace_fields()
+            ),
+        }
 
 
 @dataclass
@@ -177,6 +264,7 @@ class AgentRunner:
         redacted_argument_tools: frozenset[str] = frozenset(),
         control_handler: ControlToolHandler | None = None,
         extra_turn_fields: Callable[[], dict[str, Any]] = lambda: {},
+        preserve_reasoning: bool = True,
     ) -> None:
         # All numeric limits are host-owned; reject an incoherent configuration
         # at construction time rather than mid-turn (SPEC-011 §10).
@@ -215,6 +303,12 @@ class AgentRunner:
         # Extra fields the host contributes to the terminal trace event, read at
         # emit time so they can reflect state the turn changed while running.
         self._extra_turn_fields = extra_turn_fields
+        # Whether a decision's reasoning travels forward to the next decision of
+        # the same turn (SPEC-020 §4.5). True is the production behavior; False
+        # exists so the evaluation harness can measure preservation against its
+        # own absence on identical prompts (SPEC-020 §7.4), and reproduces the
+        # pre-SPEC-020 transcript exactly. It is not a user-facing runtime mode.
+        self._preserve_reasoning = preserve_reasoning
         # Per-turn skill context (SPEC-012); (re)assigned at the top of run_turn.
         self._selected_skill: str | None = None
         self._skill_version: str | None = None
@@ -251,6 +345,10 @@ class AgentRunner:
         to the agent's own model requests so `model_requests` means "all model
         requests made for the user turn"; `selected_skill`/`skill_version` enrich
         the trace only.
+
+        Any reasoning the model produces along the way lives only in this call's
+        working transcript and is unreachable once it returns (SPEC-020 §4.6) —
+        on the final-answer path and on every failure path alike.
 
         `system_suffix` (SPEC-018) is a host-owned block appended to the caller's
         leading system message for this turn. It is passed separately rather than
@@ -452,9 +550,9 @@ class AgentRunner:
             abandoned = threading.Event()
             model_start = self._clock()
             try:
-                text, tool_calls = run_with_deadline(
+                decision = run_with_deadline(
                     lambda: self._consume_model_response(
-                        working_messages, working_tools, abandoned
+                        working_messages, working_tools, abandoned, model_start
                     ),
                     timeout_seconds=effective_model_timeout,
                     thread_name=f"model-step-{step}",
@@ -469,8 +567,11 @@ class AgentRunner:
                     TerminationReason.MODEL_ERROR, "Model request failed."
                 ) from None
 
+            text, tool_calls = decision.text, decision.tool_calls
             model_duration_ms = int((self._clock() - model_start) * 1000)
-            decision = "tool_call" if tool_calls else ("final_answer" if text else "invalid")
+            outcome_kind = (
+                "tool_call" if tool_calls else ("final_answer" if text else "invalid")
+            )
             self._trace.emit(
                 build_event(
                     "model_response_finished",
@@ -478,10 +579,12 @@ class AgentRunner:
                     turn_id=turn_id,
                     step=step,
                     model_request_index=request_index,
-                    decision=decision,
+                    decision=outcome_kind,
                     tool_call_count=len(tool_calls),
                     text_chars=len(text),
                     duration_ms=model_duration_ms,
+                    # Reasoning and latency, as counts and timings only.
+                    **decision.trace_fields(),
                 )
             )
 
@@ -730,12 +833,18 @@ class AgentRunner:
                 if control.system_suffix is not None:
                     self._set_system_suffix(working_messages, control.system_suffix)
 
-            # Append the action and its observation to the working transcript
-            # so the next model request sees every prior tool result from this
-            # turn.
+            # Append the action, the reasoning that chose it, and its
+            # observation to the working transcript, so the next model request
+            # sees every prior decision of this turn rather than having to infer
+            # its own intent back from the action alone (SPEC-020 §4.5). Only
+            # this decision's reasoning goes onto this decision's message; the
+            # tool result is untouched, because reasoning is assistant state and
+            # not observation data.
             working_messages.extend(
                 [
-                    assistant_tool_message(call),
+                    assistant_tool_message(
+                        call, decision.thinking if self._preserve_reasoning else ""
+                    ),
                     tool_result_message(call, result),
                 ]
             )
@@ -745,19 +854,61 @@ class AgentRunner:
         working_messages: list[dict[str, Any]],
         working_tools: Sequence[dict[str, Any]],
         abandoned: threading.Event,
-    ) -> tuple[str, list[ModelToolCall]]:
-        """Runs on the deadline worker thread: stream text, then read tool_calls.
+        started: float,
+    ) -> _ModelDecision:
+        """Runs on the deadline worker thread: stream the response, then read
+        tool_calls.
+
+        Reasoning and content are accumulated independently and only content ever
+        reaches the renderer — the terminal stays reasoning-blind by construction
+        rather than by a filter someone has to remember to apply (SPEC-020 §4.4).
 
         `abandoned` is set by the calling thread once it has given up waiting
         (a deadline expired); once set, this stops calling the renderer so a
         late-arriving chunk can never print after the timeout error has
         already been shown (the renderer is not thread-safe against that).
+
+        `started` is the caller's own request-start stamp, reused rather than
+        re-read so every latency below shares an origin with the request's
+        `duration_ms`.
         """
 
         response = self._respond(working_messages, working_tools)
-        parts: list[str] = []
-        for chunk in response.text_chunks():
-            parts.append(chunk)
-            if not abandoned.is_set():
-                self._renderer.text(chunk)
-        return "".join(parts), response.tool_calls
+        thinking_parts: list[str] = []
+        content_parts: list[str] = []
+        first_thinking_ms: int | None = None
+        first_content_ms: int | None = None
+
+        def elapsed_ms() -> int:
+            return int((self._clock() - started) * 1000)
+
+        for chunk in response.chunks():
+            if chunk.thinking:
+                if first_thinking_ms is None:
+                    first_thinking_ms = elapsed_ms()
+                thinking_parts.append(chunk.thinking)
+            if chunk.content:
+                if first_content_ms is None:
+                    first_content_ms = elapsed_ms()
+                content_parts.append(chunk.content)
+                if not abandoned.is_set():
+                    self._renderer.text(chunk.content)
+
+        # `chunks()` stops on the chunk that carried the tool call, so the moment
+        # the loop above ends is the moment that chunk arrived.
+        first_tool_call_ms = elapsed_ms() if response.tool_calls else None
+        starts = [
+            value
+            for value in (first_thinking_ms, first_content_ms, first_tool_call_ms)
+            if value is not None
+        ]
+        return _ModelDecision(
+            text="".join(content_parts),
+            thinking="".join(thinking_parts),
+            tool_calls=response.tool_calls,
+            first_model_output_ms=min(starts) if starts else None,
+            first_thinking_ms=first_thinking_ms,
+            first_content_ms=first_content_ms,
+            first_tool_call_ms=first_tool_call_ms,
+            metrics=response.metrics,
+        )

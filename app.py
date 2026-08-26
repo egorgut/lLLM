@@ -7,6 +7,7 @@ from pathlib import Path
 from cli_activity import ActivityIndicator, format_turn_time
 from config import (
     CHAT_HISTORY_PATH,
+    DEFAULT_REASONING_MODE,
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_DESCRIPTION_CHARS,
     MAX_SKILL_INSTRUCTION_CHARS,
@@ -19,6 +20,7 @@ from config import (
     MCP_SERVERS,
     MODEL_PROFILES,
     PROJECT_ROOT,
+    REASONING_MODES,
     SANDBOX_ARTIFACT_ROOT,
     SANDBOX_TOOL_ENABLED,
     SANDBOX_TURN_TIME_MARGIN_SECONDS,
@@ -33,6 +35,7 @@ from config import (
     ModelProfile,
     ModelRoles,
     resolve_model_roles,
+    resolve_reasoning_think,
 )
 from conversation import Conversation
 from llm import ModelToolCall, OllamaModel
@@ -318,16 +321,25 @@ class ModelTransports:
     router: OllamaModel
 
 
-def build_model_transports(roles: ModelRoles) -> ModelTransports:
+def build_model_transports(
+    roles: ModelRoles, *, reasoning_mode: str = DEFAULT_REASONING_MODE
+) -> ModelTransports:
     """Build one transport per distinct role profile, reusing when they match.
 
     The entry point owns this composition (SPEC-019 §4.3): neither `OllamaModel`
     nor `SkillRouter` nor `AgentRunner` learns that roles exist. Shared with the
     live evaluation path (`evals/runner.py`) so there is exactly one
     implementation of the reuse rule.
+
+    `reasoning_mode` (SPEC-020 §4.2) configures the **agent** transport only. A
+    monolithic run still shares one object between the two roles, and that stays
+    safe because routing does not inherit a transport default: `text()` passes
+    `think=False` explicitly on every call, whatever mode this run selected. The
+    router transport of a split run is left on the default for the same reason —
+    giving it a mode would be configuring something that is always overridden.
     """
 
-    agent = OllamaModel.for_profile(roles.agent)
+    agent = OllamaModel.for_profile(roles.agent, reasoning_mode=reasoning_mode)
     return ModelTransports(
         agent=agent,
         router=OllamaModel.for_profile(roles.router) if roles.split else agent,
@@ -358,7 +370,24 @@ def describe_model_roles(roles: ModelRoles) -> list[str]:
     ]
 
 
-def run_started_event(run_id: str, roles: ModelRoles) -> dict:
+def describe_reasoning(mode: str, *, preserve: bool = True) -> str:
+    """The startup line naming this run's agent reasoning policy (SPEC-020 §4.12).
+
+    Printed on every run, `auto` included: a live latency measurement is only
+    readable if the mode that produced it is visible without opening the source.
+    It says nothing about what the model reasoned — only how much it was asked
+    for, and whether that reasoning travels between the decisions of one turn.
+    """
+
+    if mode == "off":
+        return "[reasoning] off"
+    preservation = "on" if preserve else "off"
+    return f"[reasoning] {mode} (transient preservation {preservation})"
+
+
+def run_started_event(
+    run_id: str, roles: ModelRoles, reasoning_mode: str = DEFAULT_REASONING_MODE
+) -> dict:
     """The `run_started` trace event for a run under `roles` (SPEC-019 §4.9).
 
     `model_name` / `model_profile` keep their SPEC-017 meaning -- the primary,
@@ -375,6 +404,9 @@ def run_started_event(run_id: str, roles: ModelRoles) -> dict:
         model_profile=roles.agent.name,
         router_model_name=roles.router.model,
         router_model_profile=roles.router.name,
+        # Additive (SPEC-020 §4.12): which reasoning policy the agent requests
+        # decided the latency every later event in this file records.
+        reasoning_mode=reasoning_mode,
         app_version=None,
     )
 
@@ -448,6 +480,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "routing runs on the same profile as the agent, exactly as before."
         ),
     )
+    parser.add_argument(
+        "--reasoning",
+        choices=REASONING_MODES,
+        default=DEFAULT_REASONING_MODE,
+        help=(
+            "How much hidden reasoning the agent model is asked for (SPEC-020): "
+            "auto keeps the model/server default, off disables thinking, low and "
+            "medium request that effort. Skill routing always runs without "
+            "thinking regardless. Fixed for the whole run."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -461,6 +504,10 @@ def main(argv: list[str] | None = None) -> None:
     validate_model_profiles()
     roles = resolve_model_roles(args.profile, args.router_profile)
     validate_model_roles(roles)
+    # Host-owned and fixed for the process (SPEC-020 §4.1): argparse rejects an
+    # unknown name, and this call is what makes the mapping to Ollama's own
+    # `think` value fail here rather than on the first model request.
+    resolve_reasoning_think(args.reasoning)
 
     # Fill any gaps in the process environment from a local `.env` before
     # anything (e.g. Tracker's config loader) reads it. Real exported
@@ -477,7 +524,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     trace_sink = SafeTraceSink(sink, run_id)
     run_started_at = time.monotonic()
-    trace_sink.emit(run_started_event(run_id, roles))
+    trace_sink.emit(run_started_event(run_id, roles, args.reasoning))
 
     store = JsonConversationStore(CHAT_HISTORY_PATH)
     conversation = Conversation(messages=store.load())
@@ -561,7 +608,7 @@ def main(argv: list[str] | None = None) -> None:
         # than read from a module-level constant at import time (SPEC-017 §4.4).
         # One per distinct role profile: the router and the agent loop share a
         # single object whenever they resolved to the same profile (SPEC-019 §4.3).
-        transports = build_model_transports(roles)
+        transports = build_model_transports(roles, reasoning_mode=args.reasoning)
 
         router = SkillRouter(
             route=transports.router.text,
@@ -629,6 +676,7 @@ def main(argv: list[str] | None = None) -> None:
 
         for line in describe_model_roles(roles):
             print(line)
+        print(describe_reasoning(args.reasoning))
         for summary in manager.server_summaries():
             print(f"[mcp] {summary}")
         print(sandbox_diagnostic)

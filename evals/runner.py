@@ -18,6 +18,7 @@ Usage:
     python -m evals.runner --suite scripted
     python -m evals.runner --suite live
     python -m evals.runner --suite live --profile next --router-profile fast
+    python -m evals.runner --suite live --profile next --reasoning low
 """
 
 import argparse
@@ -33,6 +34,7 @@ from typing import Any
 
 from agent import AgentRunner
 from config import (
+    DEFAULT_REASONING_MODE,
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_ACTIVATIONS_PER_TURN,
     MAX_SKILL_DESCRIPTION_CHARS,
@@ -42,6 +44,7 @@ from config import (
     MAX_SKILLS,
     MAX_TOOL_CALLS_PER_TURN,
     MODEL_PROFILES,
+    REASONING_MODES,
     SKILL_ROUTING_REPAIR_ATTEMPTS,
     SKILLS_ROOT,
     TOOL_EXECUTION_TIMEOUT_SECONDS,
@@ -79,6 +82,21 @@ RESULTS_DIR = PROJECT_ROOT / "data" / "evals"
 SCHEMA_VERSION = 1
 
 
+@dataclass(frozen=True)
+class ReasoningSettings:
+    """How a live run treats the agent model's hidden reasoning (SPEC-020).
+
+    `mode` is the ordinary host-owned setting the application also exposes.
+    `preserve` is **not**: it exists only so §7.4 can measure reasoning that is
+    generated-and-preserved against reasoning that is generated-and-discarded on
+    the same prompts and the same commit. Production always preserves, and
+    `app.py` deliberately has no flag for this.
+    """
+
+    mode: str = DEFAULT_REASONING_MODE
+    preserve: bool = True
+
+
 @dataclass
 class CaseResult:
     id: str
@@ -110,6 +128,17 @@ class CaseResult:
     tool_sequence: list[str] = field(default_factory=list)
     activation_events: list[dict[str, Any]] = field(default_factory=list)
     model_request_ms: list[int] = field(default_factory=list)
+    # SPEC-020 §4.13. The reasoning policy is part of a live result's identity:
+    # two runs of the same case under different modes are not comparable without
+    # it. The metric lists are per agent model request, in order, read from the
+    # trace -- counts and timings only, never reasoning text.
+    reasoning_mode: str | None = None
+    preserve_reasoning: bool | None = None
+    thinking_chars: list[int] = field(default_factory=list)
+    first_model_output_ms: list[int | None] = field(default_factory=list)
+    visible_ttft_ms: list[int | None] = field(default_factory=list)
+    ollama_prompt_eval_ms: list[int | None] = field(default_factory=list)
+    ollama_eval_ms: list[int | None] = field(default_factory=list)
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -420,7 +449,14 @@ def _render_live_prompt(template: str) -> str:
 
 
 def run_live_case(
-    case: dict[str, Any], executor, tools, respond, run_id: str, roles: ModelRoles
+    case: dict[str, Any],
+    executor,
+    tools,
+    respond,
+    run_id: str,
+    roles: ModelRoles,
+    trace: MemoryTraceSink,
+    reasoning: ReasoningSettings,
 ) -> CaseResult:
     from prompts import SYSTEM_PROMPT
 
@@ -439,7 +475,11 @@ def run_live_case(
         model_request_timeout_seconds=profile.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
         agent_turn_timeout_seconds=profile.agent_turn_timeout_seconds,
-        trace_sink=NullTraceSink(),
+        # A real sink, unlike before SPEC-020: the reasoning and latency metrics
+        # a live comparison needs are only observable through the trace, and the
+        # multi-tool case that proves preservation runs on this path.
+        trace_sink=trace,
+        preserve_reasoning=reasoning.preserve,
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -462,6 +502,7 @@ def run_live_case(
 
     tool_calls_used = [name for name, _ in executor.calls]
     failures = evaluate_expectation(outcome, tool_calls_used, case["expectation"])
+    events = _turn_events(trace, outcome.turn_id)
     return CaseResult(
         id=case["id"],
         passed=not failures,
@@ -474,11 +515,38 @@ def run_live_case(
         router_profile=roles.router.name,
         router_model=roles.router.model,
         model_requests=outcome.model_requests,
+        reasoning_mode=reasoning.mode,
+        preserve_reasoning=reasoning.preserve,
+        **_reasoning_metrics(events),
     )
 
 
 def _turn_events(trace: MemoryTraceSink, turn_id: str) -> list[dict[str, Any]]:
     return [event for event in trace.events if event.get("turn_id") == turn_id]
+
+
+def _reasoning_metrics(events: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    """Per-model-request reasoning/latency metrics for one turn (SPEC-020 §4.9).
+
+    Read from `model_response_finished` in emission order, so entry *i* is the
+    turn's *i*-th agent model request. Every value is a count or a millisecond
+    offset: the events carry no reasoning text to read, by design.
+    """
+
+    finished = [
+        event for event in events if event["event"] == "model_response_finished"
+    ]
+    return {
+        "thinking_chars": [event.get("thinking_chars", 0) for event in finished],
+        "first_model_output_ms": [
+            event.get("first_model_output_ms") for event in finished
+        ],
+        "visible_ttft_ms": [event.get("visible_ttft_ms") for event in finished],
+        "ollama_prompt_eval_ms": [
+            event.get("ollama_prompt_eval_ms") for event in finished
+        ],
+        "ollama_eval_ms": [event.get("ollama_eval_ms") for event in finished],
+    }
 
 
 def run_live_skill_case(
@@ -487,6 +555,7 @@ def run_live_skill_case(
     trace: MemoryTraceSink,
     executor,
     roles: ModelRoles,
+    reasoning: ReasoningSettings,
 ) -> CaseResult:
     """One live case through the *real* skill-aware turn (PATCH-018-01).
 
@@ -516,6 +585,8 @@ def run_live_skill_case(
             profile=roles.agent.name,
             router_profile=roles.router.name,
             router_model=roles.router.model,
+            reasoning_mode=reasoning.mode,
+            preserve_reasoning=reasoning.preserve,
         )
 
     events = _turn_events(trace, result.outcome.turn_id)
@@ -570,6 +641,9 @@ def run_live_skill_case(
         tool_sequence=tool_sequence,
         activation_events=activation_events,
         model_request_ms=model_request_ms,
+        reasoning_mode=reasoning.mode,
+        preserve_reasoning=reasoning.preserve,
+        **_reasoning_metrics(events),
     )
 
 
@@ -582,6 +656,7 @@ def _build_live_orchestrator(
     run_id: str,
     trace: MemoryTraceSink,
     sandbox,
+    reasoning: ReasoningSettings,
 ) -> SkillTurnOrchestrator:
     """Assemble the production skill-aware turn exactly as `app.py` does.
 
@@ -643,10 +718,15 @@ def _build_live_orchestrator(
         redacted_argument_tools=(
             frozenset({sandbox.spec.name}) if sandbox else frozenset()
         ),
+        preserve_reasoning=reasoning.preserve,
     )
 
 
-def _run_live_cases(cases: list[dict[str, Any]], roles: ModelRoles) -> list[CaseResult]:
+def _run_live_cases(
+    cases: list[dict[str, Any]],
+    roles: ModelRoles,
+    reasoning: ReasoningSettings = ReasoningSettings(),
+) -> list[CaseResult]:
     # Imported lazily: the live suite is the only path that needs a real
     # Ollama connection, real local tools, and a real MCP server. Keeping this
     # import out of the module top level means the scripted suite (and the
@@ -730,7 +810,7 @@ def _run_live_cases(cases: list[dict[str, Any]], roles: ModelRoles) -> list[Case
         # One transport per distinct role profile, built by the application's own
         # composition helper so a live split run is wired exactly as `app.py`
         # wires it (SPEC-019 §4.3, §4.10).
-        transports = build_model_transports(roles)
+        transports = build_model_transports(roles, reasoning_mode=reasoning.mode)
 
         orchestrator = (
             _build_live_orchestrator(
@@ -742,16 +822,26 @@ def _run_live_cases(cases: list[dict[str, Any]], roles: ModelRoles) -> list[Case
                 run_id,
                 trace,
                 sandbox,
+                reasoning,
             )
             if skill_cases
             else None
         )
 
         return [
-            run_live_skill_case(case, orchestrator, trace, recording_executor, roles)
+            run_live_skill_case(
+                case, orchestrator, trace, recording_executor, roles, reasoning
+            )
             if case.get("skill_case")
             else run_live_case(
-                case, recording_executor, tools, transports.agent.respond, run_id, roles
+                case,
+                recording_executor,
+                tools,
+                transports.agent.respond,
+                run_id,
+                roles,
+                trace,
+                reasoning,
             )
             for case in cases
         ]
@@ -764,6 +854,7 @@ def run_suite(
     cases_path: Path,
     category: str | None = None,
     roles: ModelRoles | None = None,
+    reasoning: ReasoningSettings = ReasoningSettings(),
 ) -> tuple[dict[str, int], list[CaseResult]]:
     cases = load_cases(cases_path)
     applicable = [case for case in cases if suite in case.get("modes", ["scripted", "live"])]
@@ -778,7 +869,9 @@ def run_suite(
             for case in applicable
         ]
     elif suite == "live":
-        results = _run_live_cases(applicable, roles or resolve_model_roles())
+        results = _run_live_cases(
+            applicable, roles or resolve_model_roles(), reasoning
+        )
     else:
         raise ValueError(f"Unknown suite: {suite}")
 
@@ -822,6 +915,13 @@ def write_results(
                 "tool_sequence": result.tool_sequence,
                 "activation_events": result.activation_events,
                 "model_request_ms": result.model_request_ms,
+                "reasoning_mode": result.reasoning_mode,
+                "preserve_reasoning": result.preserve_reasoning,
+                "thinking_chars": result.thinking_chars,
+                "first_model_output_ms": result.first_model_output_ms,
+                "visible_ttft_ms": result.visible_ttft_ms,
+                "ollama_prompt_eval_ms": result.ollama_prompt_eval_ms,
+                "ollama_eval_ms": result.ollama_eval_ms,
                 "duration_ms": result.duration_ms,
                 "failures": result.failures,
             }
@@ -854,6 +954,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "scripted suite."
         ),
     )
+    parser.add_argument(
+        "--reasoning",
+        choices=REASONING_MODES,
+        default=DEFAULT_REASONING_MODE,
+        help=(
+            "Agent-side reasoning mode for the live suite (SPEC-020); ignored by "
+            "the scripted suite, which never contacts a model."
+        ),
+    )
+    parser.add_argument(
+        "--no-reasoning-preservation",
+        action="store_true",
+        help=(
+            "Evaluation only (SPEC-020 §7.4): stop a decision's reasoning from "
+            "travelling to the next decision of the same turn, so preservation "
+            "can be measured against its own absence. Never a production mode."
+        ),
+    )
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES_PATH)
     parser.add_argument(
         "--category",
@@ -874,7 +992,12 @@ def main(argv: list[str] | None = None) -> int:
         from app import validate_model_roles
 
         validate_model_roles(roles)
-    summary, results = run_suite(args.suite, args.cases, args.category, roles)
+    reasoning = ReasoningSettings(
+        mode=args.reasoning, preserve=not args.no_reasoning_preservation
+    )
+    summary, results = run_suite(
+        args.suite, args.cases, args.category, roles, reasoning
+    )
     model_name = "scripted" if args.suite == "scripted" else roles.agent.model
     result_path = write_results(args.suite, summary, results, model_name)
 

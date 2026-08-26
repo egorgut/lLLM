@@ -4,8 +4,6 @@ Nothing here contacts Ollama: the transport is exercised through a fake client
 that records what it was asked for.
 """
 
-from types import SimpleNamespace
-
 import pytest
 
 import config
@@ -18,27 +16,16 @@ from config import (
     resolve_model_profile,
 )
 from llm import ModelResponse, OllamaModel
-
-
-class FakeClient:
-    """Records every chat() call and replays canned stream chunks."""
-
-    def __init__(self, chunks=()) -> None:
-        self.calls: list[dict] = []
-        self._chunks = list(chunks)
-
-    def chat(self, **kwargs):
-        self.calls.append(kwargs)
-        return iter(self._chunks)
+from tests.support import FakeOllamaClient as FakeClient
+from tests.support import sdk_chunk
 
 
 def text_chunk(text: str):
-    return SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))
+    return sdk_chunk(content=text)
 
 
 def tool_chunk(name: str, arguments: dict):
-    call = SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
-    return SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[call]))
+    return sdk_chunk(tool_calls=[(name, arguments)])
 
 
 class TestCommittedProfiles:

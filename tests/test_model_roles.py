@@ -7,7 +7,6 @@ under each role's own deadlines.
 """
 
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -29,25 +28,15 @@ from llm import ROUTING_RESPONSE_SCHEMA, OllamaModel
 from reliability import SkillRoutingTimeout
 from skill_runtime.models import SkillCatalogEntry
 from skill_runtime.router import SkillRouter
+from tests.support import FakeOllamaClient as FakeClient
+from tests.support import sdk_chunk
 from tracing import MemoryTraceSink
 
 CATALOG = (SkillCatalogEntry("sales_analysis", "Analyse sales and revenue data"),)
 
 
-class FakeClient:
-    """Records every chat() call and replays canned stream chunks."""
-
-    def __init__(self, chunks=()) -> None:
-        self.calls: list[dict] = []
-        self._chunks = list(chunks)
-
-    def chat(self, **kwargs):
-        self.calls.append(kwargs)
-        return iter(self._chunks)
-
-
 def text_chunk(text: str):
-    return SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))
+    return sdk_chunk(content=text)
 
 
 def roles_from(argv: list[str]) -> ModelRoles:
@@ -175,6 +164,67 @@ class TestRoleCallableProvenance:
         # Unchanged agent behavior: reasoning and format stay the SDK defaults.
         assert agent_client.calls[0]["think"] is None
         assert agent_client.calls[0]["format"] is None
+
+
+class TestAgentReasoningModeAcrossRoles:
+    """The agent reasoning mode reaches the agent, and only the agent (SPEC-020 §4.2).
+
+    Both SPEC-019 shapes are checked, because they differ in a way that matters:
+    a monolithic run hands the *same* `OllamaModel` to the router and to the loop,
+    so "the router must not inherit the mode" is a claim about one object serving
+    two roles, not about two objects staying apart.
+    """
+
+    def test_a_monolithic_run_applies_the_mode_to_the_shared_transport(self):
+        transports = build_model_transports(
+            resolve_model_roles("next"), reasoning_mode="low"
+        )
+        client = FakeClient(
+            [text_chunk('{"skill": null, "reason": "n/a"}'), text_chunk("done")]
+        )
+        transports.agent._client = client
+
+        assert transports.router is transports.agent
+        list(transports.agent.respond([{"role": "user", "content": "hi"}]).chunks())
+        transports.router.text([{"role": "user", "content": "hi"}])
+
+        assert [call["think"] for call in client.calls] == ["low", False]
+
+    def test_a_split_run_leaves_the_router_transport_on_the_default(self):
+        transports = build_model_transports(
+            resolve_model_roles("next", "fast"), reasoning_mode="medium"
+        )
+        agent_client = FakeClient([text_chunk("done")])
+        router_client = FakeClient([text_chunk('{"skill": null, "reason": "n/a"}')])
+        transports.agent._client = agent_client
+        transports.router._client = router_client
+
+        list(transports.agent.respond([{"role": "user", "content": "hi"}]).chunks())
+        transports.router.text([{"role": "user", "content": "hi"}])
+
+        assert agent_client.calls[0]["think"] == "medium"
+        assert router_client.calls[0]["think"] is False
+
+    def test_the_default_run_is_unchanged_by_spec_020(self):
+        transports = build_model_transports(resolve_model_roles())
+        client = FakeClient([text_chunk("done")])
+        transports.agent._client = client
+
+        list(transports.agent.respond([{"role": "user", "content": "hi"}]).chunks())
+
+        assert client.calls[0]["think"] is None
+
+    def test_the_mode_is_recorded_in_the_run_started_event(self):
+        event = run_started_event("run-1", resolve_model_roles("next", "fast"), "low")
+
+        assert event["reasoning_mode"] == "low"
+        # The SPEC-019 identity fields keep their meaning beside it.
+        assert event["model_name"] == "qwen3.8:27b"
+        assert event["router_model_name"] == "qwen3:8b"
+
+    def test_the_cli_defaults_the_mode_to_auto(self):
+        assert parse_args([]).reasoning == "auto"
+        assert parse_args(["--reasoning", "medium"]).reasoning == "medium"
 
 
 class TestRoleDeadlineOwnership:

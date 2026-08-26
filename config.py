@@ -1,6 +1,7 @@
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 OLLAMA_HOST = "http://localhost:11434"
 
@@ -114,6 +115,55 @@ def resolve_model_roles(agent: str | None = None, router: str | None = None) -> 
         agent=agent_profile,
         router=agent_profile if router is None else resolve_model_profile(router),
     )
+
+
+# Agent-side reasoning mode (SPEC-020). A thinking-capable model emits hidden
+# reasoning before its answer, and how much of it is worth paying for is a
+# question about the run, not about the model file -- so the mode is host-owned
+# and fixed for the whole process, exactly like a profile: the model never sees
+# it, never supplies it, and cannot change it mid-session.
+#
+# `auto` is the backward-compatible default: it sends no `think` at all, leaving
+# the model/server default exactly as every journal before SPEC-020 recorded it.
+#
+# There is deliberately no `high`/`xhigh` here (SPEC-020 §4.1). The installed
+# Ollama SDK (0.6.2) types `think` as bool | Literal["low", "medium", "high"],
+# while the Qwen3.8 template's highest named effort is `xhigh` -- two different
+# names for "the most deliberation this thing does". `auto` already preserves
+# whatever the package considers its default, without inventing a mapping
+# between the two vocabularies. If a later Ollama exposes a stable native
+# contract for that tier, adding it is a separate PATCH.
+ReasoningMode = Literal["auto", "off", "low", "medium"]
+REASONING_MODES: tuple[str, ...] = ("auto", "off", "low", "medium")
+DEFAULT_REASONING_MODE = "auto"
+
+
+def resolve_reasoning_think(mode: str | None = None) -> bool | str | None:
+    """The Ollama `think` value one reasoning mode asks for; `None` selects the default.
+
+    Returns what the transport passes straight through to the SDK:
+
+        auto   -> None    (send nothing; the model/server default stands)
+        off    -> False
+        low    -> "low"
+        medium -> "medium"
+
+    An unknown name is a deployment mistake, not a turn-time event, so this
+    raises with the valid names -- the same shape and the same timing as
+    `resolve_model_profile` above, and for the same reason: it must fail before
+    the chat loop rather than silently run under the wrong policy.
+    """
+
+    if mode is None:
+        mode = DEFAULT_REASONING_MODE
+    if mode not in REASONING_MODES:
+        valid = ", ".join(REASONING_MODES)
+        raise ValueError(f"Unknown reasoning mode '{mode}'. Valid modes: {valid}.")
+    if mode == "auto":
+        return None
+    if mode == "off":
+        return False
+    return mode
 
 
 # Maximum number of stored messages sent to the model on each turn.
