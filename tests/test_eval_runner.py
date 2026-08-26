@@ -285,3 +285,73 @@ class TestLiveRoleSelection:
         assert payload["cases"][0]["profile"] == "next"
         assert payload["cases"][0]["router_profile"] == "fast"
         assert payload["cases"][0]["router_model"] == "qwen3:8b"
+
+
+class TestLiveReasoningSettings:
+    """The reasoning policy a live run measured under (SPEC-020 §4.13, §7.4)."""
+
+    def test_the_live_cli_accepts_the_same_modes_as_the_app(self):
+        assert parse_args(["--suite", "live"]).reasoning == "auto"
+        assert parse_args(["--suite", "live", "--reasoning", "low"]).reasoning == "low"
+
+    def test_an_unknown_mode_never_starts_a_run(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--suite", "live", "--reasoning", "xhigh"])
+
+    def test_preservation_is_on_unless_the_ab_flag_is_given(self):
+        from evals.runner import ReasoningSettings
+
+        assert ReasoningSettings().preserve is True
+        assert parse_args(["--suite", "live"]).no_reasoning_preservation is False
+        assert (
+            parse_args(
+                ["--suite", "live", "--no-reasoning-preservation"]
+            ).no_reasoning_preservation
+            is True
+        )
+
+    def test_scripted_suite_ignores_the_reasoning_flags(self):
+        from evals.runner import ReasoningSettings
+
+        baseline, _ = run_suite("scripted", DEFAULT_CASES_PATH)
+        altered, _ = run_suite(
+            "scripted",
+            DEFAULT_CASES_PATH,
+            None,
+            None,
+            ReasoningSettings(mode="medium", preserve=False),
+        )
+
+        assert altered == baseline
+
+    def test_results_record_the_mode_and_the_metrics_but_no_reasoning(
+        self, tmp_path, monkeypatch
+    ):
+        import evals.runner as runner
+
+        monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path)
+        result = CaseResult(
+            id="multi-tool-001",
+            passed=True,
+            status="completed",
+            reason="final_answer",
+            tool_calls=["sql_query", "python_calculate"],
+            duration_ms=1234,
+            profile="next",
+            reasoning_mode="low",
+            preserve_reasoning=True,
+            thinking_chars=[812, 0],
+            first_model_output_ms=[640, 700],
+            visible_ttft_ms=[8200, 900],
+        )
+
+        path = write_results("live", {"total": 1, "passed": 1, "failed": 0}, [result], "qwen3.8:27b")
+        case = json.loads(path.read_text(encoding="utf-8"))["cases"][0]
+
+        assert case["reasoning_mode"] == "low"
+        assert case["preserve_reasoning"] is True
+        assert case["thinking_chars"] == [812, 0]
+        assert case["visible_ttft_ms"] == [8200, 900]
+        # Counts and timings only: there is no field a reasoning string could
+        # travel in, which is the point (SPEC-020 §4.11).
+        assert not any("thinking" in key for key in case if key != "thinking_chars")

@@ -6,8 +6,53 @@ docstring) rather than duplicating small fixture classes for a handful of
 scripted scenarios.
 """
 
-from llm import ModelToolCall
+from types import SimpleNamespace
+
+from llm import ModelResponseMetrics, ModelStreamChunk, ModelToolCall
 from tools import ToolRegistry, ToolSpec
+
+
+class FakeOllamaClient:
+    """Records every `chat()` call and replays canned stream chunks.
+
+    Stands in for `ollama.Client` wherever a test asserts on the *shape of the
+    request* the transport builds, with no live Ollama involved.
+    """
+
+    def __init__(self, chunks=()) -> None:
+        self.calls: list[dict] = []
+        self._chunks = list(chunks)
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        return iter(self._chunks)
+
+
+def sdk_chunk(
+    *,
+    content: str | None = None,
+    thinking: str | None = None,
+    tool_calls=None,
+    **metadata,
+):
+    """One streamed `ChatResponse` as the installed SDK (0.6.2) shapes it.
+
+    Modelled in exactly one place so the fake cannot drift from the real type:
+    every `Message` carries `thinking` alongside `content`, whether or not the
+    model filled it in, and the final chunk of a response also carries Ollama's
+    own `*_duration` / `*_count` metadata (`metadata`, in nanoseconds).
+    """
+
+    calls = [
+        SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
+        for name, arguments in (tool_calls or [])
+    ]
+    return SimpleNamespace(
+        message=SimpleNamespace(
+            content=content, thinking=thinking, tool_calls=calls or None
+        ),
+        **metadata,
+    )
 
 
 def make_tool_call(name: str, arguments: dict) -> ModelToolCall:
@@ -83,22 +128,47 @@ class ScriptedModelResponse:
     that never finishes streaming — the first (and only) chunk read blocks on
     the event forever, which is exactly what a real deadline-timeout test
     needs without requiring the production-sized timeout constants.
+
+    `thinking` (SPEC-020) is the model's hidden reasoning for this decision. Like
+    the real transport, it is yielded *before* any content and never merged into
+    it; the default empty string models a non-thinking response.
     """
 
-    def __init__(self, *, text: str = "", tool_calls=None, block_on=None) -> None:
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        thinking: str = "",
+        tool_calls=None,
+        block_on=None,
+        metrics: ModelResponseMetrics | None = None,
+    ) -> None:
         self._text = text
+        self._thinking = thinking
         self._tool_calls = list(tool_calls) if tool_calls else []
         self._block_on = block_on
+        self._metrics = metrics
 
-    def text_chunks(self):
+    def chunks(self):
         if self._block_on is not None:
             self._block_on.wait()
+        if self._thinking:
+            yield ModelStreamChunk(thinking=self._thinking)
         if self._text:
-            yield self._text
+            yield ModelStreamChunk(content=self._text)
+
+    def text_chunks(self):
+        for chunk in self.chunks():
+            if chunk.content:
+                yield chunk.content
 
     @property
     def tool_calls(self) -> list[ModelToolCall]:
         return self._tool_calls
+
+    @property
+    def metrics(self) -> ModelResponseMetrics | None:
+        return self._metrics
 
 
 class ScriptedResponder:

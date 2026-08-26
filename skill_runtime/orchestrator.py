@@ -96,6 +96,7 @@ class SkillTurnOrchestrator:
         on_activation: Callable[[SkillSpec, str | None], None] = (
             lambda _spec, _replaced: None
         ),
+        preserve_reasoning: bool = True,
     ) -> None:
         self._skill_registry = skill_registry
         self._router = router
@@ -119,6 +120,12 @@ class SkillTurnOrchestrator:
         self._redacted_argument_tools = redacted_argument_tools
         self._max_skill_activations = max_skill_activations
         self._on_activation = on_activation
+        # Passed straight through to every runner this orchestrator builds
+        # (SPEC-020 §7.4). The orchestrator has no opinion on reasoning: an
+        # `activate_skill` decision preserves its own reasoning exactly like any
+        # other tool decision, and the SPEC-018 system-suffix replacement stays
+        # the authority on what the model is told afterwards.
+        self._preserve_reasoning = preserve_reasoning
         # The registry is frozen at startup, so the declaration is built once.
         # None when there is no skill to activate (SPEC-018 §4.2).
         self._activate_declaration = build_activate_skill_declaration(
@@ -346,6 +353,7 @@ class SkillTurnOrchestrator:
             redacted_argument_tools=self._redacted_argument_tools,
             control_handler=control_handler,
             extra_turn_fields=extra_turn_fields,
+            preserve_reasoning=self._preserve_reasoning,
         )
 
     def _routing_failure(

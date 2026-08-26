@@ -303,6 +303,73 @@ class TestViewReplacement:
         assert [name for name, _ in executor.calls] == ["python_calculate"]
 
 
+class TestControlCallsPreserveTheirReasoning:
+    """SPEC-020 §4.7 — a control tool is an ordinary decision for preservation.
+
+    The loop must not learn that some tool calls are "the host's" for this
+    purpose: whatever a decision reasoned about, it reasoned before choosing the
+    call it chose, and the next decision needs that either way. What preservation
+    must *not* do is grant that reasoning any authority -- it travels as
+    historical assistant state, beside a call the loop had already accepted under
+    every policy it applies to any other.
+    """
+
+    def test_the_reasoning_behind_a_control_call_travels_with_it(self):
+        handler = RecordingControlHandler(
+            [ControlResult(result={"ok": True}, system_suffix="new view")]
+        )
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(
+                    thinking="this is really a sales question",
+                    tool_calls=[control_call(skill="sales_analysis")],
+                ),
+                ScriptedModelResponse(text="Done."),
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        runner.run_turn(BASE_MESSAGES)
+
+        second_request = responder.calls[1][0]
+        [assistant] = [m for m in second_request if m.get("role") == "assistant"]
+        assert assistant["thinking"] == "this is really a sales question"
+        # And the host block is still the authority on what the model is told.
+        assert second_request[0]["content"].endswith("new view")
+
+    def test_preserved_reasoning_does_not_stack_or_bypass_the_host_block(self):
+        # Two activations in one turn: the system message must still carry
+        # exactly one host block, chosen by SPEC-018's replacement rule and not
+        # by anything the model reasoned in between.
+        handler = RecordingControlHandler(
+            [
+                ControlResult(result={"ok": True}, system_suffix="first view"),
+                ControlResult(result={"ok": True}, system_suffix="second view"),
+            ]
+        )
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(
+                    thinking="try sales", tool_calls=[control_call(skill="a")]
+                ),
+                ScriptedModelResponse(
+                    thinking="no, tracker", tool_calls=[control_call(skill="b")]
+                ),
+                ScriptedModelResponse(text="Done."),
+            ]
+        )
+        runner = make_runner(responder, control_handler=handler)
+
+        runner.run_turn([{"role": "system", "content": "base"}, *BASE_MESSAGES])
+
+        third_request = responder.calls[2][0]
+        assert third_request[0]["content"] == "base\n\nsecond view"
+        assert [m["thinking"] for m in third_request if m.get("role") == "assistant"] == [
+            "try sales",
+            "no, tracker",
+        ]
+
+
 class TestControlToolIsOptional:
     def test_a_runner_without_a_handler_dispatches_normally(self):
         call = make_tool_call("python_calculate", {"expression": "1+1"})

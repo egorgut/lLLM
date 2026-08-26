@@ -13,27 +13,16 @@ A regression in either direction is a real defect, so both sides are asserted.
 """
 
 import time
-from types import SimpleNamespace
 
 from llm import ROUTING_RESPONSE_SCHEMA, ModelResponse, OllamaModel
 from skill_runtime.models import SkillCatalogEntry
 from skill_runtime.router import SkillRouter
-
-
-class FakeClient:
-    """Records every chat() call and replays canned stream chunks."""
-
-    def __init__(self, chunks=()) -> None:
-        self.calls: list[dict] = []
-        self._chunks = list(chunks)
-
-    def chat(self, **kwargs):
-        self.calls.append(kwargs)
-        return iter(self._chunks)
+from tests.support import FakeOllamaClient as FakeClient
+from tests.support import sdk_chunk
 
 
 def text_chunk(text: str):
-    return SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))
+    return sdk_chunk(content=text)
 
 
 MESSAGES = [{"role": "user", "content": "hi"}]
