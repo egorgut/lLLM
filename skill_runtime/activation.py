@@ -21,7 +21,11 @@ from typing import Any
 
 from agent import ControlResult
 from skill_runtime.models import SkillCatalogEntry, SkillSpec
-from skill_runtime.policy import RestrictedToolExecutor, declarations_for_names
+from skill_runtime.policy import (
+    RestrictedToolExecutor,
+    SkillToolset,
+    compose_skill_toolset,
+)
 from skill_runtime.prompting import compose_active_skill
 from skill_runtime.registry import SkillRegistry
 from tools import ToolExecutor, ToolRegistry
@@ -118,6 +122,7 @@ class SkillActivationHandler:
         run_id: str,
         turn_id: str,
         initial_skill: SkillSpec | None = None,
+        baseline_tools: Sequence[str] = (),
         trace: TraceSink = NullTraceSink(),
         on_activation: Callable[[SkillSpec, str | None], None] = (
             lambda _spec, _replaced: None
@@ -128,6 +133,9 @@ class SkillActivationHandler:
         # The unrestricted global executor, kept for the lifetime of the turn.
         self._executor = executor
         self._declaration = declaration
+        # The host baseline survives replacement: an activation swaps which
+        # *domain* tools are available, never the host's own (PATCH-012-02).
+        self._baseline_tools = tuple(baseline_tools)
         self._max_activations = max_activations
         self._run_id = run_id
         self._turn_id = turn_id
@@ -196,21 +204,28 @@ class SkillActivationHandler:
         spec = self._skill_registry.get(requested)
         self._activations += 1
 
+        # Composed by the same rule the orchestrator used for the router's
+        # selection, so the two entry points cannot drift. Computed before the
+        # already-active branch below, because the receipt must report the real
+        # effective view either way.
+        toolset = compose_skill_toolset(
+            self._tool_registry,
+            spec.allowed_tools,
+            self._baseline_tools,
+            self._declaration,
+        )
+
         if spec.name == replaced:
             # Already active: acknowledged, counted, but nothing is recomposed —
             # rewriting an identical system block would invalidate the model's
             # cached prefix for no gain (SPEC-018 §4.4).
             self._emit_activated(spec, replaced, recomposed=False)
-            return ControlResult(result=self._receipt(spec, replaced))
+            return ControlResult(result=self._receipt(spec, replaced, toolset))
 
-        tools = (*declarations_for_names(self._tool_registry, spec.allowed_tools),
-                 self._declaration)
         # Always over the original global executor: wrapping the previous
         # restricted wrapper would let one turn's restrictions accumulate.
         executor = RestrictedToolExecutor(
-            self._executor,
-            frozenset(spec.allowed_tools) | {ACTIVATE_SKILL_TOOL_NAME},
-            skill=spec.name,
+            self._executor, toolset.allowed_tools, skill=spec.name
         )
         self._active = spec
 
@@ -233,26 +248,35 @@ class SkillActivationHandler:
                 run_id=self._run_id,
                 turn_id=self._turn_id,
                 skill=spec.name,
-                available_tools=[t["function"]["name"] for t in tools],
+                available_tools=list(toolset.names),
+                skill_tools=list(toolset.skill_tools),
+                baseline_tools=list(toolset.baseline_tools),
             )
         )
         self._emit_activated(spec, replaced, recomposed=True)
         self._on_activation(spec, replaced)
 
         return ControlResult(
-            result=self._receipt(spec, replaced),
-            tools=tools,
+            result=self._receipt(spec, replaced, toolset),
+            tools=toolset.declarations,
             executor=executor,
             # Replaces the previous block entirely; the loop composes it from the
             # turn's base system prompt, so no stale wrapper can survive.
             system_suffix=compose_active_skill(spec),
         )
 
-    def _receipt(self, spec: SkillSpec, replaced: str | None) -> dict[str, Any]:
+    def _receipt(
+        self, spec: SkillSpec, replaced: str | None, toolset: SkillToolset
+    ) -> dict[str, Any]:
         """The model-facing result: a receipt, never the instruction itself.
 
         The instruction went to the system layer; repeating it here would waste
         context and weaken the precedence SPEC-012 §10 establishes.
+
+        ``available_tools`` is read off the composed toolset rather than rebuilt
+        from ``spec.allowed_tools``: telling the model that a host baseline tool
+        is gone while it is still declared would be the same contradiction this
+        patch exists to remove (PATCH-012-02).
         """
 
         return {
@@ -260,7 +284,7 @@ class SkillActivationHandler:
             "skill": spec.name,
             "version": spec.version,
             "replaced": replaced,
-            "available_tools": [*spec.allowed_tools, ACTIVATE_SKILL_TOOL_NAME],
+            "available_tools": list(toolset.names),
         }
 
     def _emit_activated(

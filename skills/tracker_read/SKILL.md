@@ -49,6 +49,11 @@ criteria cannot be safely inferred from the request.
 - `mcp_tracker__issue_get_comments` only when comments or discussion are
   relevant to the answer (`issue_id` required).
 
+The host may also supply general-purpose utilities alongside these — for
+example the current date and time, which an "overdue" or "as of now" judgement
+needs. The tools the host actually supplies for the turn are authoritative; use
+one when the answer genuinely depends on it.
+
 ## Procedure
 
 1. Determine whether the request names an issue, a queue, a search, or
@@ -75,9 +80,9 @@ criteria cannot be safely inferred from the request.
 
 ## Constraints
 
-- Never call a tool outside the four listed above — no local tool
-  (`sql_query`, `python_calculate`) and no other MCP tool (e.g.
-  `mcp_time__get_current_time`) belongs to this skill.
+- Never call a tool the host did not supply for this turn. No local tool
+  (`sql_query`, `python_calculate`) and no other domain integration belongs to
+  this skill; only Tracker reads and the host's own utilities do.
 - Never call, imply the existence of, or attempt any Tracker mutation
   (create, update, close, transition, comment, link, worklog, attachment,
   checklist, follower, or assignee change), regardless of how the request is

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cli_activity import ActivityIndicator, format_turn_time
 from config import (
+    BASELINE_TOOL_NAMES,
     CHAT_HISTORY_PATH,
     DEFAULT_REASONING_MODE,
     MAX_IDENTICAL_TOOL_CALLS,
@@ -56,6 +57,7 @@ from skill_runtime import (
     SkillPackageLoader,
     SkillRouter,
     SkillTurnOrchestrator,
+    validate_baseline_tools,
     validate_skill_config,
 )
 from skill_runtime.models import SkillSelection, SkillSpec
@@ -597,6 +599,10 @@ def main(argv: list[str] | None = None) -> None:
             max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
             max_skill_activations_per_turn=MAX_SKILL_ACTIVATIONS_PER_TURN,
         )
+        # Same rule, same moment: the host's baseline tools must exist in the
+        # final registry too, or every active skill would quietly lose a
+        # capability the host promised it (PATCH-012-02).
+        validate_baseline_tools(BASELINE_TOOL_NAMES, registry)
         omit_skills = omitted_skills(mcp_servers, sandbox)
         try:
             skill_registry = SkillPackageLoader().load_all(SKILLS_ROOT, registry, omit=omit_skills)
@@ -661,6 +667,7 @@ def main(argv: list[str] | None = None) -> None:
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
             on_selection=announce_skill,
             max_skill_activations=MAX_SKILL_ACTIVATIONS_PER_TURN,
+            baseline_tools=BASELINE_TOOL_NAMES,
             on_activation=announce_activation,
             # Binds each sandbox turn to the turn_id and deadline the
             # orchestrator mints, before routing spends any of it.

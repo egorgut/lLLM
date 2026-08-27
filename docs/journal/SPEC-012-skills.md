@@ -154,3 +154,11 @@ metric was absent. No SPEC-011 behavior regressed.
   14,819 characters of hidden reasoning); it now decides in about a second. The
   deadlines turned out to be sound and were left alone.
   See [`docs/journal/patches/PATCH-012-01-bound-skill-routing-generation.md`](patches/PATCH-012-01-bound-skill-routing-generation.md).
+- `PATCH-012-02` — composes a host-owned baseline tool set with the active
+  skill's own instead of replacing it. Selecting `tracker_read` used to delete
+  `mcp_time__get_current_time` from the model's view, so a Tracker turn could
+  read a deadline but not learn the current date; the model then asked for the
+  date, hedged, hallucinated it, and denied the tool existed. One shared
+  `compose_skill_toolset` now builds declarations and executor policy together
+  for both the router's selection and mid-turn `activate_skill`.
+  See [`docs/journal/patches/PATCH-012-02-compose-baseline-tools-with-active-skills.md`](patches/PATCH-012-02-compose-baseline-tools-with-active-skills.md).

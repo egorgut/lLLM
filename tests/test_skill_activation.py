@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from config import BASELINE_TOOL_NAMES
 from conversation import Conversation
 from reliability import TerminationReason, TurnStatus
 from skill_runtime.activation import (
@@ -83,6 +84,7 @@ def build_orchestrator(
     max_tool_calls=4,
     max_skill_activations=2,
     on_activation=None,
+    baseline_tools=(),
 ):
     tool_registry = make_tool_registry(*TOOL_NAMES)
     executor = FakeToolExecutor(handlers or {})
@@ -103,6 +105,7 @@ def build_orchestrator(
         trace_sink=trace or MemoryTraceSink(),
         max_skill_activations=max_skill_activations,
         on_activation=on_activation or (lambda _spec, _replaced: None),
+        baseline_tools=baseline_tools,
     )
     return orchestrator, executor
 
@@ -750,3 +753,176 @@ class TestHandlerContract:
 
         assert handler.activations == 0
         assert handler.active_skill is None
+
+
+class TestBaselineToolsSurviveActivation:
+    """PATCH-012-02 — activation replaces domain tools, never the host baseline."""
+
+    def test_replacement_keeps_the_baseline_and_drops_the_old_domain_tools(self):
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(text="Rock."),
+            ]
+        )
+        orch, _ = build_orchestrator(
+            routed_to("tracker_read"),
+            responder=responder,
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        result = orch.run_turn(conversation_with("read A-1 then the revenue"))
+
+        assert result.outcome.status is TurnStatus.COMPLETED
+        assert declared_names(responder, 0) == [
+            "mcp_tracker__issue_get",
+            "mcp_time__get_current_time",
+            ACTIVATE_SKILL_TOOL_NAME,
+        ]
+        assert declared_names(responder, 1) == [
+            "sql_query",
+            "python_calculate",
+            "mcp_time__get_current_time",
+            ACTIVATE_SKILL_TOOL_NAME,
+        ]
+
+    def test_baseline_tool_executes_after_a_replacement(self):
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(
+                    tool_calls=[make_tool_call("mcp_time__get_current_time", {})]
+                ),
+                ScriptedModelResponse(text="Done."),
+            ]
+        )
+        orch, executor = build_orchestrator(
+            routed_to("tracker_read"),
+            responder=responder,
+            handlers={"mcp_time__get_current_time": lambda a: {"ok": True}},
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        result = orch.run_turn(conversation_with("read A-1 then the revenue"))
+
+        assert result.outcome.status is TurnStatus.COMPLETED
+        assert [name for name, _ in executor.calls] == ["mcp_time__get_current_time"]
+
+    def test_repeated_activation_does_not_duplicate_declarations(self):
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(text="Rock."),
+            ]
+        )
+        orch, _ = build_orchestrator(
+            routed_to("tracker_read"),
+            responder=responder,
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        orch.run_turn(conversation_with("revenue please"))
+
+        names = declared_names(responder, 2)
+        assert names.count("mcp_time__get_current_time") == 1
+        assert names.count(ACTIVATE_SKILL_TOOL_NAME) == 1
+
+    def test_replacement_still_forbids_the_previous_skills_domain_tools(self):
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(
+                    tool_calls=[make_tool_call("mcp_tracker__issue_get", {})]
+                ),
+            ]
+        )
+        orch, executor = build_orchestrator(
+            routed_to("tracker_read"),
+            responder=responder,
+            handlers={"mcp_tracker__issue_get": lambda a: {"ok": True}},
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        result = orch.run_turn(conversation_with("read A-1"))
+
+        assert result.outcome.reason is TerminationReason.SKILL_POLICY_VIOLATION
+        assert executor.calls == []
+
+    def test_toolset_trace_after_activation_separates_the_two_sources(self):
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(text="Rock."),
+            ]
+        )
+        trace = MemoryTraceSink()
+        orch, _ = build_orchestrator(
+            routed_to("tracker_read"),
+            responder=responder,
+            trace=trace,
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        orch.run_turn(conversation_with("revenue please"))
+
+        resolved = [e for e in trace.events if e["event"] == "skill_toolset_resolved"]
+        assert resolved[-1]["skill_tools"] == ["sql_query", "python_calculate"]
+        assert resolved[-1]["baseline_tools"] == ["mcp_time__get_current_time"]
+        assert resolved[-1]["available_tools"] == [
+            "sql_query",
+            "python_calculate",
+            "mcp_time__get_current_time",
+            ACTIVATE_SKILL_TOOL_NAME,
+        ]
+
+    def test_receipt_reports_the_effective_view_including_baseline(self):
+        handler = SkillActivationHandler(
+            skill_registry=skill_registry(),
+            tool_registry=make_tool_registry(*TOOL_NAMES),
+            executor=FakeToolExecutor(),
+            declaration=build_activate_skill_declaration(skill_registry().catalog()),
+            max_activations=2,
+            run_id="run-1",
+            turn_id="turn-1",
+            initial_skill=TRACKER_SPEC,
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        control = handler.handle(ACTIVATE_SKILL_TOOL_NAME, {"name": "sales_analysis"})
+
+        # The model must not be told Time is gone while it is still declared.
+        assert control.result["available_tools"] == [
+            "sql_query",
+            "python_calculate",
+            "mcp_time__get_current_time",
+            ACTIVATE_SKILL_TOOL_NAME,
+        ]
+        assert control.result["available_tools"] == [
+            t["function"]["name"] for t in control.tools
+        ]
+
+    def test_already_active_receipt_also_reports_the_effective_view(self):
+        handler = SkillActivationHandler(
+            skill_registry=skill_registry(),
+            tool_registry=make_tool_registry(*TOOL_NAMES),
+            executor=FakeToolExecutor(),
+            declaration=build_activate_skill_declaration(skill_registry().catalog()),
+            max_activations=2,
+            run_id="run-1",
+            turn_id="turn-1",
+            initial_skill=SALES_SPEC,
+            baseline_tools=BASELINE_TOOL_NAMES,
+        )
+
+        control = handler.handle(ACTIVATE_SKILL_TOOL_NAME, {"name": "sales_analysis"})
+
+        # Nothing is recomposed on this branch, but the receipt still has to
+        # describe the view the turn is actually running under.
+        assert control.tools is None
+        assert control.result["available_tools"] == [
+            "sql_query",
+            "python_calculate",
+            "mcp_time__get_current_time",
+            ACTIVATE_SKILL_TOOL_NAME,
+        ]

@@ -8,6 +8,7 @@ policy stops, and that routing protocol / selection are never persisted.
 
 from pathlib import Path
 
+from config import BASELINE_TOOL_NAMES
 from conversation import Conversation
 from reliability import (
     InvalidSkillSelection,
@@ -42,9 +43,22 @@ SALES_SPEC = SkillSpec(
 )
 
 
+TRACKER_SPEC = SkillSpec(
+    name="tracker_read",
+    description="Read and summarise Tracker issues",
+    version="1",
+    allowed_tools=("mcp_tracker__issue_get",),
+    instruction="# Tracker Read\nProcedure body.",
+    input_schema={"type": "object", "properties": {}},
+    package_path=Path("/skills/tracker_read"),
+    fingerprint="sha256:tracker",
+)
+
+
 def skill_registry():
     registry = SkillRegistry()
     registry.register(SALES_SPEC)
+    registry.register(TRACKER_SPEC)
     return registry
 
 
@@ -58,9 +72,13 @@ def build_orchestrator(
     on_selection=None,
     max_tool_calls=4,
     registry=None,
+    baseline_tools=(),
 ):
     tool_registry = make_tool_registry(
-        "sql_query", "python_calculate", "mcp_time__get_current_time"
+        "sql_query",
+        "python_calculate",
+        "mcp_time__get_current_time",
+        "mcp_tracker__issue_get",
     )
     executor = FakeToolExecutor(handlers or {})
     return (
@@ -81,6 +99,7 @@ def build_orchestrator(
             trace_sink=trace or MemoryTraceSink(),
             clock=clock or __import__("time").monotonic,
             on_selection=on_selection or (lambda _s: None),
+            baseline_tools=baseline_tools,
         ),
         executor,
     )
@@ -217,18 +236,22 @@ def test_routing_timeout_produces_timed_out_outcome():
 
 
 def test_disallowed_tool_stops_turn_with_policy_violation():
+    # A foreign *domain* tool, deliberately not a host baseline tool: Time is
+    # composed into every active skill's view since PATCH-012-02, so it can no
+    # longer stand for "a tool this skill may not call".
     router = ScriptedSkillRouter(model_selection("sales_analysis"))
     responder = ScriptedResponder(
-        [ScriptedModelResponse(tool_calls=[make_tool_call("mcp_time__get_current_time", {})])]
+        [ScriptedModelResponse(tool_calls=[make_tool_call("mcp_tracker__issue_get", {})])]
     )
     trace = MemoryTraceSink()
     orch, executor = build_orchestrator(
         router,
         responder=responder,
-        handlers={"mcp_time__get_current_time": lambda a: {"ok": True}},
+        handlers={"mcp_tracker__issue_get": lambda a: {"ok": True}},
         trace=trace,
+        baseline_tools=BASELINE_TOOL_NAMES,
     )
-    result = orch.run_turn(conversation_with("what time is it?"))
+    result = orch.run_turn(conversation_with("look up DATA-142"))
     assert result.outcome.status is TurnStatus.STOPPED
     assert result.outcome.reason is TerminationReason.SKILL_POLICY_VIOLATION
     # The disallowed tool never executed.
@@ -237,7 +260,7 @@ def test_disallowed_tool_stops_turn_with_policy_violation():
         e for e in trace.events
         if e["event"] == "policy_violation" and e.get("policy") == "skill_tool_allowlist"
     )
-    assert violation["requested_tool"] == "mcp_time__get_current_time"
+    assert violation["requested_tool"] == "mcp_tracker__issue_get"
     assert violation["skill"] == "sales_analysis"
 
 
@@ -325,3 +348,127 @@ def test_on_selection_called_with_selection():
     )
     orch.run_turn(conversation_with("revenue"))
     assert seen and seen[0].skill_name == "sales_analysis"
+
+
+# --- Host baseline tools composed with the active skill (PATCH-012-02) --------
+#
+# The defect these cover: selecting a domain skill used to *replace* the whole
+# tool view, so a Tracker turn silently lost the host's Time tool and could not
+# tell whether a deadline had passed.
+
+
+def test_baseline_tools_are_declared_alongside_the_skills_own():
+    router = ScriptedSkillRouter(model_selection("tracker_read"))
+    responder = ScriptedResponder([ScriptedModelResponse(text="DATA-142 is open.")])
+    orch, _ = build_orchestrator(
+        router, responder=responder, baseline_tools=BASELINE_TOOL_NAMES
+    )
+
+    orch.run_turn(conversation_with("show me DATA-142"))
+
+    _messages, tools = responder.calls[0]
+    assert [t["function"]["name"] for t in tools] == [
+        "mcp_tracker__issue_get",
+        "mcp_time__get_current_time",
+        "activate_skill",
+    ]
+
+
+def test_baseline_tool_executes_under_an_active_skill():
+    router = ScriptedSkillRouter(model_selection("tracker_read"))
+    responder = ScriptedResponder(
+        [
+            ScriptedModelResponse(
+                tool_calls=[make_tool_call("mcp_tracker__issue_get", {"issue_id": "D-1"})]
+            ),
+            ScriptedModelResponse(
+                tool_calls=[
+                    make_tool_call("mcp_time__get_current_time", {"timezone": "UTC"})
+                ]
+            ),
+            ScriptedModelResponse(text="D-1 is overdue."),
+        ]
+    )
+    orch, executor = build_orchestrator(
+        router,
+        responder=responder,
+        handlers={
+            "mcp_tracker__issue_get": lambda a: {"ok": True, "data": {"key": "D-1"}},
+            "mcp_time__get_current_time": lambda a: {
+                "ok": True,
+                "datetime": "2026-08-27T10:00:00Z",
+            },
+        },
+        baseline_tools=BASELINE_TOOL_NAMES,
+    )
+
+    result = orch.run_turn(conversation_with("is DATA-142 overdue as of now?"))
+
+    # One domain capability and one host baseline capability in the same turn,
+    # with no skill change: the restricted executor really dispatched both.
+    assert result.outcome.status is TurnStatus.COMPLETED
+    assert [name for name, _ in executor.calls] == [
+        "mcp_tracker__issue_get",
+        "mcp_time__get_current_time",
+    ]
+    assert result.final_skill == "tracker_read"
+    assert result.activations == 0
+
+
+def test_baseline_does_not_widen_access_to_other_domain_tools():
+    router = ScriptedSkillRouter(model_selection("tracker_read"))
+    responder = ScriptedResponder(
+        [ScriptedModelResponse(tool_calls=[make_tool_call("sql_query", {"query": "SELECT 1"})])]
+    )
+    orch, executor = build_orchestrator(
+        router,
+        responder=responder,
+        handlers={"sql_query": lambda a: {"ok": True}},
+        baseline_tools=BASELINE_TOOL_NAMES,
+    )
+
+    result = orch.run_turn(conversation_with("show me revenue"))
+
+    assert result.outcome.reason is TerminationReason.SKILL_POLICY_VIOLATION
+    assert executor.calls == []
+
+
+def test_toolset_trace_separates_skill_tools_from_baseline():
+    router = ScriptedSkillRouter(model_selection("tracker_read"))
+    responder = ScriptedResponder([ScriptedModelResponse(text="done")])
+    trace = MemoryTraceSink()
+    orch, _ = build_orchestrator(
+        router, responder=responder, trace=trace, baseline_tools=BASELINE_TOOL_NAMES
+    )
+
+    orch.run_turn(conversation_with("show me DATA-142"))
+
+    resolved = next(e for e in trace.events if e["event"] == "skill_toolset_resolved")
+    assert resolved["available_tools"] == [
+        "mcp_tracker__issue_get",
+        "mcp_time__get_current_time",
+        "activate_skill",
+    ]
+    assert resolved["skill_tools"] == ["mcp_tracker__issue_get"]
+    assert resolved["baseline_tools"] == ["mcp_time__get_current_time"]
+
+
+def test_no_skill_path_keeps_the_whole_global_tool_set():
+    router = ScriptedSkillRouter(none_selection())
+    responder = ScriptedResponder([ScriptedModelResponse(text="It is 10:00.")])
+    orch, _ = build_orchestrator(
+        router, responder=responder, baseline_tools=BASELINE_TOOL_NAMES
+    )
+
+    orch.run_turn(conversation_with("what time is it?"))
+
+    # Baseline composition applies to an *active skill*; without one the model
+    # still sees every registered tool, exactly as before.
+    _messages, tools = responder.calls[0]
+    assert [t["function"]["name"] for t in tools] == [
+        "sql_query",
+        "python_calculate",
+        "mcp_time__get_current_time",
+        "mcp_tracker__issue_get",
+        "activate_skill",
+    ]

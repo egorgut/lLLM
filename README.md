@@ -729,6 +729,26 @@ python -m evals.runner --suite live --category skill_live   # ход целик�
 разрешённые декларации, а исполнитель (`RestrictedToolExecutor`) отклоняет вызов
 вне allowlist ещё до обработчика (`stopped/skill_policy_violation`).
 
+**Базовые инструменты хоста (PATCH-012-02).** Навык сужает *доменные*
+возможности, но не стирает общие утилиты хоста. Эффективный набор для активного
+навыка — это композиция, а не замена:
+
+```text
+инструменты навыка + базовые инструменты хоста + activate_skill
+```
+
+Базовый набор задан в `config.BASELINE_TOOL_NAMES`, принадлежит хосту и сейчас
+состоит ровно из одного инструмента — `mcp_time__get_current_time`. Его нельзя
+изменить из чата, из модели или из пакета навыка (схема `SKILL.md` не менялась:
+`allowed_tools` по-прежнему объявляет только доменные инструменты навыка), а
+имена проверяются против финального реестра уже после регистрации MCP. Одна
+общая функция `compose_skill_toolset` строит декларации и allowlist исполнителя
+вместе — и при выборе навыка роутером, и при замене навыка через
+`activate_skill`, — поэтому модель никогда не видит инструмент, который
+исполнитель отклонит. Практический смысл: под `tracker_read` можно прочитать
+дедлайн задачи *и* узнать текущее время, не выходя из навыка, но `sql_query`
+или `sandbox_execute` от этого доступнее не становятся.
+
 **Проверка на старте — fail-fast.** Все пакеты обнаруживаются и валидируются до
 входа в чат: имя по regex и совпадение с именем каталога, обязательные поля и
 заголовки, безопасный парсер front matter, структурная проверка
@@ -739,8 +759,8 @@ python -m evals.runner --suite live --category skill_live   # ход целик�
 Application startup failed: Skill 'sales_analysis' references unknown tool 'write_text_file'.
 ```
 
-Пример пакета — `skills/sales_analysis/` (анализ выручки/продаж; использует
-`sql_query` и `python_calculate`, запрещает `mcp_time__get_current_time`):
+Пример пакета — `skills/sales_analysis/` (анализ выручки/продаж; объявляет
+`sql_query` и `python_calculate`, а Tracker-инструменты ему недоступны):
 
 ```text
 You: Which music genre generated the most revenue, and what percentage of total revenue did it generate?
