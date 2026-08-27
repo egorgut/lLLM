@@ -4,8 +4,8 @@
 - **Parent spec:** [SPEC-012](../../../specs/SPEC-012-Skills.md)
 - **Date:** 2026-08-27
 - **Branch:** patch/PATCH-012-02-compose-baseline-tools-with-active-skills
-- **Implementation commit:** `<pending>`
-- **Merge commit:** `<pending>`
+- **Implementation commit:** `da1b6a4`
+- **Merge commit:** `0816d1b`
 
 ## Hypothesis / intent
 
