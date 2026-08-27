@@ -301,6 +301,23 @@ MAX_SKILL_DESCRIPTION_CHARS = 200
 # recoverable — the turn continues under the skill already active.
 MAX_SKILL_ACTIVATIONS_PER_TURN = 2
 
+# Host baseline tools (PATCH-012-02). Tools that stay in the model-facing tool
+# set while a skill is active, composed with — never replaced by — the skill's
+# own `allowed_tools`. A skill narrows *domain* capability; it must not erase a
+# safe, general-purpose host utility that the domain task may legitimately need
+# (a Tracker deadline is only "overdue" relative to the current time).
+#
+# The host alone owns this list. It is fixed here, deterministic in order, and
+# deliberately minimal: a skill cannot add to it, remove from it, or grant itself
+# anything through it, and it is not configurable by the model or through chat.
+# Baseline status is never inferred from a tool's name, its MCP server, its
+# description, or the fact that it happens to be read-only — adding a member is
+# a repository change that goes through review. The names are validated against
+# the final tool registry after MCP registration
+# (skill_runtime.config_validation.validate_baseline_tools), because the MCP
+# tools do not exist yet at import time.
+BASELINE_TOOL_NAMES: tuple[str, ...] = ("mcp_time__get_current_time",)
+
 # Isolated sandbox runtime (SPEC-015). The runtime itself owns every execution
 # rule below; SPEC-016 added the model-facing boundary on top of it (see the
 # SANDBOX_TOOL_* block after this one) without changing a single limit here.

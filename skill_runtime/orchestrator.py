@@ -37,12 +37,11 @@ from reliability import (
     new_id,
 )
 from skill_runtime.activation import (
-    ACTIVATE_SKILL_TOOL_NAME,
     SkillActivationHandler,
     build_activate_skill_declaration,
 )
 from skill_runtime.models import SkillSelection, SkillSpec
-from skill_runtime.policy import RestrictedToolExecutor, declarations_for_names
+from skill_runtime.policy import RestrictedToolExecutor, compose_skill_toolset
 from skill_runtime.prompting import compose_active_skill
 from skill_runtime.registry import SkillRegistry
 from skill_runtime.router import SkillRouter
@@ -93,6 +92,7 @@ class SkillTurnOrchestrator:
         on_turn_context: Callable[[TurnContext], None] = lambda _context: None,
         redacted_argument_tools: frozenset[str] = frozenset(),
         max_skill_activations: int = MAX_SKILL_ACTIVATIONS_PER_TURN,
+        baseline_tools: Sequence[str] = (),
         on_activation: Callable[[SkillSpec, str | None], None] = (
             lambda _spec, _replaced: None
         ),
@@ -119,6 +119,11 @@ class SkillTurnOrchestrator:
         self._on_turn_context = on_turn_context
         self._redacted_argument_tools = redacted_argument_tools
         self._max_skill_activations = max_skill_activations
+        # Host-owned tools that survive skill selection and replacement
+        # (PATCH-012-02). Injected rather than read from config, because the
+        # host owns the baseline and this layer only composes what it is
+        # given; an empty default is a view identical to SPEC-012's.
+        self._baseline_tools = tuple(baseline_tools)
         self._on_activation = on_activation
         # Passed straight through to every runner this orchestrator builds
         # (SPEC-020 §7.4). The orchestrator has no opinion on reasoning: an
@@ -188,6 +193,7 @@ class SkillTurnOrchestrator:
             run_id=self._run_id,
             turn_id=context.turn_id,
             initial_skill=initial_skill,
+            baseline_tools=self._baseline_tools,
             trace=self._trace,
             on_activation=self._on_activation,
         )
@@ -283,8 +289,16 @@ class SkillTurnOrchestrator:
                 allowed_tools=list(spec.allowed_tools),
             )
         )
-        tools = self._with_activate_skill(
-            declarations_for_names(self._tool_registry, spec.allowed_tools)
+        # The skill narrows the domain tools; the host baseline and the reserved
+        # activation name are composed on top (PATCH-012-02). One helper builds
+        # both the declarations and the allowlist, so the executor can never
+        # disagree with what the model was shown — even though the loop
+        # intercepts the control call before it reaches dispatch.
+        toolset = compose_skill_toolset(
+            self._tool_registry,
+            spec.allowed_tools,
+            self._baseline_tools,
+            self._activate_declaration,
         )
         self._trace.emit(
             build_event(
@@ -292,19 +306,17 @@ class SkillTurnOrchestrator:
                 run_id=self._run_id,
                 turn_id=context.turn_id,
                 skill=spec.name,
-                available_tools=[t["function"]["name"] for t in tools],
+                available_tools=list(toolset.names),
+                skill_tools=list(toolset.skill_tools),
+                baseline_tools=list(toolset.baseline_tools),
             )
         )
-        # The reserved name joins the allowlist so the executor agrees with the
-        # declarations, even though the loop intercepts the call before dispatch.
         restricted = RestrictedToolExecutor(
-            self._executor,
-            frozenset(spec.allowed_tools) | {ACTIVATE_SKILL_TOOL_NAME},
-            skill=spec.name,
+            self._executor, toolset.allowed_tools, skill=spec.name
         )
         handler = self._activation_handler(context, spec)
         runner = self._build_runner(
-            tools,
+            toolset.declarations,
             restricted,
             control_handler=handler,
             extra_turn_fields=self._turn_fields(handler, spec.name),

@@ -3,6 +3,10 @@ integration"). Mirrors ``reliability.validate_reliability_config``: all bounds a
 host-owned, the model never supplies them, so an incoherent value is a deployment
 defect raised as a plain ``ValueError`` before the chat loop starts."""
 
+from collections.abc import Sequence
+
+from tools import ToolRegistry
+
 
 def validate_skill_config(
     *,
@@ -38,3 +42,32 @@ def validate_skill_config(
     ):
         if value < 1:
             raise ValueError(f"{name} must be at least 1, got {value}.")
+
+
+def validate_baseline_tools(
+    baseline_tool_names: Sequence[str], tool_registry: ToolRegistry
+) -> None:
+    """Check the host's baseline tool names against the final tool registry.
+
+    Separate from ``validate_skill_config`` because this is the one piece of
+    skill configuration that cannot be checked at import time: MCP tools are only
+    registered once their servers have started, so the caller must run this after
+    MCP registration, against the same registry the skills are validated against
+    (PATCH-012-02).
+
+    A name the registry does not know is a deployment mistake — a disabled server,
+    a renamed remote tool, a typo — and silently dropping it would quietly remove
+    a capability every active skill is supposed to keep. So it fails startup, the
+    same way an unknown ``allowed_tools`` entry in a skill package does.
+    """
+
+    seen: set[str] = set()
+    for name in baseline_tool_names:
+        if name in seen:
+            raise ValueError(f"Baseline tool '{name}' is configured more than once.")
+        seen.add(name)
+        if name not in tool_registry:
+            raise ValueError(
+                f"Baseline tool '{name}' is not registered. Host baseline tools "
+                "must exist in the tool registry after MCP registration."
+            )

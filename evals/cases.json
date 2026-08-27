@@ -574,15 +574,17 @@
       "scripted"
     ],
     "skill_case": true,
-    "prompt": "Within sales analysis, tell me the current UTC time.",
+    "prompt": "Within sales analysis, look up Tracker issue DATA-142.",
     "route": [
       "{\"skill\": \"sales_analysis\", \"reason\": \"routed to sales analysis\"}"
     ],
     "script": [
       {
         "tool_call": {
-          "name": "mcp_time__get_current_time",
-          "arguments": {}
+          "name": "mcp_tracker__issue_get",
+          "arguments": {
+            "issue_id": "DATA-142"
+          }
         }
       }
     ],
@@ -592,7 +594,7 @@
       "status": "stopped",
       "reason": "skill_policy_violation",
       "forbidden_tools": [
-        "mcp_time__get_current_time"
+        "mcp_tracker__issue_get"
       ]
     }
   },
@@ -935,6 +937,78 @@
       "status": "completed",
       "reason": "final_answer",
       "max_tool_calls": 0
+    }
+  },
+  {
+    "id": "skill-baseline-time-001",
+    "category": "skill_baseline_time",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Check the Tracker issue DATA-142 deadline and tell me whether it is overdue as of now.",
+    "route": [
+      "{\"skill\": \"tracker_read\", \"reason\": \"reading a tracker issue\"}"
+    ],
+    "script": [
+      {
+        "tool_call": {
+          "name": "mcp_tracker__issue_get",
+          "arguments": {
+            "issue_id": "DATA-142",
+            "include_description": false
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "mcp_time__get_current_time",
+          "arguments": {
+            "timezone": "UTC"
+          }
+        }
+      },
+      {
+        "text": "DATA-142 was due 2026-08-20 and it is now 2026-08-27, so it is overdue by 7 days."
+      }
+    ],
+    "tool_results": {
+      "mcp_tracker__issue_get": {
+        "ok": true,
+        "server": "tracker",
+        "tool": "issue_get",
+        "data": {
+          "key": "DATA-142",
+          "status": "Open",
+          "dueDate": "2026-08-20"
+        }
+      },
+      "mcp_time__get_current_time": {
+        "ok": true,
+        "server": "time",
+        "tool": "get_current_time",
+        "datetime": "2026-08-27T09:00:00+00:00"
+      }
+    },
+    "expectation": {
+      "expected_selection": "tracker_read",
+      "selection_source": "model",
+      "expected_final_skill": "tracker_read",
+      "expected_activations": 0,
+      "status": "completed",
+      "reason": "final_answer",
+      "required_tools": [
+        "mcp_tracker__issue_get",
+        "mcp_time__get_current_time"
+      ],
+      "forbidden_tools": [
+        "sql_query",
+        "python_calculate",
+        "sandbox_execute"
+      ],
+      "answer_contains": [
+        "overdue"
+      ]
     }
   },
   {

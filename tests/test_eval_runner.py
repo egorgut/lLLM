@@ -179,6 +179,7 @@ class TestCasesFile:
             "skill_activation_replace",
             "skill_activation_unknown",
             "skill_activation_cap",
+            "skill_baseline_time",
             "skill_live_none",
             "skill_live_sales",
             "skill_live_tracker",

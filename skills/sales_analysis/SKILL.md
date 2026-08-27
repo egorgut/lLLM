@@ -37,6 +37,10 @@ safely inferred.
 - `python_calculate` only for derived calculations that are clearer or safer
   outside SQL.
 
+The host may also supply general-purpose utilities alongside these. The tools
+the host actually supplies for the turn are authoritative; use one only when the
+sales answer genuinely depends on it.
+
 ## Procedure
 
 1. Restate the metric and grain internally before querying.
@@ -55,7 +59,7 @@ safely inferred.
 
 - Never invent tables, columns, periods, values, or units.
 - Never imply access to data outside the available database.
-- Never use a tool outside the declared allowlist.
+- Never use a tool the host did not supply for this turn.
 - Never hide truncation or missing data.
 - Never present a derived percentage without identifying its denominator.
 - Do not expose raw chain-of-thought.

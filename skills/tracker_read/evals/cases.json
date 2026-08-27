@@ -7,7 +7,7 @@
       "user_message": "Use the tracker_read skill and show me issue DATA-142.",
       "expected_selection": "tracker_read",
       "expected_tools": ["mcp_tracker__issue_get"],
-      "forbidden_tools": ["sql_query", "python_calculate", "mcp_time__get_current_time"],
+      "forbidden_tools": ["sql_query", "python_calculate"],
       "expected_status": "completed",
       "expected_answer_contains": ["DATA-142"]
     },
@@ -16,7 +16,7 @@
       "user_message": "Use the tracker_read skill and summarise the comments in DATA-142.",
       "expected_selection": "tracker_read",
       "expected_tools": ["mcp_tracker__issue_get", "mcp_tracker__issue_get_comments"],
-      "forbidden_tools": ["sql_query", "python_calculate", "mcp_time__get_current_time"],
+      "forbidden_tools": ["sql_query", "python_calculate"],
       "expected_status": "completed"
     },
     {

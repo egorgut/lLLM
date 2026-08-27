@@ -17,11 +17,19 @@ from skill_runtime.activation import (
     SkillActivationHandler,
     build_activate_skill_declaration,
 )
-from skill_runtime.config_validation import validate_skill_config
+from skill_runtime.config_validation import (
+    validate_baseline_tools,
+    validate_skill_config,
+)
 from skill_runtime.loader import SkillPackageError, SkillPackageLoader
 from skill_runtime.models import SkillCatalogEntry, SkillSelection, SkillSpec
 from skill_runtime.orchestrator import SkillTurnOrchestrator
-from skill_runtime.policy import RestrictedToolExecutor, declarations_for_names
+from skill_runtime.policy import (
+    RestrictedToolExecutor,
+    SkillToolset,
+    compose_skill_toolset,
+    declarations_for_names,
+)
 from skill_runtime.prompting import compose_active_skill
 from skill_runtime.registry import SkillRegistry
 from skill_runtime.router import SkillRouter, parse_explicit_selection
@@ -37,10 +45,13 @@ __all__ = [
     "SkillRouter",
     "SkillSelection",
     "SkillSpec",
+    "SkillToolset",
     "SkillTurnOrchestrator",
     "build_activate_skill_declaration",
     "compose_active_skill",
+    "compose_skill_toolset",
     "declarations_for_names",
     "parse_explicit_selection",
+    "validate_baseline_tools",
     "validate_skill_config",
 ]

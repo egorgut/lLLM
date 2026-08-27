@@ -34,6 +34,7 @@ from typing import Any
 
 from agent import AgentRunner
 from config import (
+    BASELINE_TOOL_NAMES,
     DEFAULT_REASONING_MODE,
     MAX_IDENTICAL_TOOL_CALLS,
     MAX_SKILL_ACTIVATIONS_PER_TURN,
@@ -58,6 +59,7 @@ from skill_runtime import (
     SkillPackageLoader,
     SkillRouter,
     SkillTurnOrchestrator,
+    validate_baseline_tools,
     validate_skill_config,
 )
 from tests.support import (
@@ -380,6 +382,7 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
         agent_turn_timeout_seconds=SCRIPTED_PROFILE.agent_turn_timeout_seconds,
         trace_sink=NullTraceSink(),
+        baseline_tools=BASELINE_TOOL_NAMES,
     )
 
     conversation = Conversation()
@@ -685,6 +688,7 @@ def _build_live_orchestrator(
         max_skill_description_chars=MAX_SKILL_DESCRIPTION_CHARS,
         max_skill_activations_per_turn=MAX_SKILL_ACTIVATIONS_PER_TURN,
     )
+    validate_baseline_tools(BASELINE_TOOL_NAMES, registry)
     skill_registry = SkillPackageLoader().load_all(
         SKILLS_ROOT, registry, omit=omitted_skills(mcp_servers, sandbox)
     )
@@ -712,6 +716,7 @@ def _build_live_orchestrator(
         trace_sink=trace,
         payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
         max_skill_activations=MAX_SKILL_ACTIVATIONS_PER_TURN,
+        baseline_tools=BASELINE_TOOL_NAMES,
         on_turn_context=(
             sandbox.workspace.begin_turn if sandbox else lambda _context: None
         ),

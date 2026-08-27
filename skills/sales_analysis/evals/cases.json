@@ -7,7 +7,6 @@
       "user_message": "Which genre generated the most revenue?",
       "expected_selection": "sales_analysis",
       "expected_tools": ["sql_query"],
-      "forbidden_tools": ["mcp_time__get_current_time"],
       "expected_status": "completed",
       "expected_answer_contains": ["revenue"]
     },
@@ -16,7 +15,6 @@
       "user_message": "What percentage of total revenue did the top genre generate?",
       "expected_selection": "sales_analysis",
       "expected_tools": ["sql_query"],
-      "forbidden_tools": ["mcp_time__get_current_time"],
       "expected_status": "completed",
       "expected_answer_contains": ["%"]
     },
