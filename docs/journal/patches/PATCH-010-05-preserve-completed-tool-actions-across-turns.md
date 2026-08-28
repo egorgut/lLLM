@@ -5,7 +5,7 @@
 - **Date:** 2026-08-28
 - **Branch:** patch/PATCH-010-05-preserve-completed-tool-actions-across-turns
 - **Implementation commit:** `41f1272`
-- **Merge commit:** `MERGE_SHA`
+- **Merge commit:** `6918133`
 
 ## The live contradiction
 
