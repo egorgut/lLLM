@@ -98,6 +98,28 @@ USER_MESSAGE_BY_REASON: dict[TerminationReason, str | None] = {
 
 
 @dataclass(frozen=True)
+class AgentActionReceipt:
+    """Host-recorded proof that one tool execution really happened (PATCH-010-05).
+
+    Provenance, not observation: the tool's identity, the bounded arguments it was
+    given, and whether the host saw it succeed. Never a raw result body, never the
+    model's reasoning. `result_ok` is False for a tool that returned a structured
+    error — a failed call is still a real action the agent took.
+
+    `arguments_preview` is empty and `arguments_redacted` True for a tool whose
+    arguments are content rather than parameters (a sandbox source, a user's
+    files). No hash of redacted content is kept either — the same rule the trace
+    already applies (SPEC-016 §15.3), never a weaker one.
+    """
+
+    tool_name: str
+    arguments_preview: str
+    arguments_truncated: bool
+    arguments_redacted: bool
+    result_ok: bool
+
+
+@dataclass(frozen=True)
 class AgentTurnOutcome:
     """The single authoritative result of one user turn.
 
@@ -105,6 +127,11 @@ class AgentTurnOutcome:
     `final_text` is present only for `status == COMPLETED`; every other status
     carries `final_text = None` so a partial or failed turn can never be
     mistaken for a persistable answer.
+
+    `action_receipts` follows exactly the same rule (PATCH-010-05): a turn that
+    stopped, timed out, failed, or was cancelled is rolled back whole, so it
+    reports no receipts even if it did execute a tool before ending. Provenance
+    only ever describes an answer the user actually received.
     """
 
     run_id: str
@@ -116,6 +143,7 @@ class AgentTurnOutcome:
     model_requests: int
     duration_ms: int
     error_message: str | None = None
+    action_receipts: tuple[AgentActionReceipt, ...] = ()
 
 
 @dataclass(frozen=True)

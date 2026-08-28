@@ -37,13 +37,14 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from llm import ModelResponseMetrics, ModelStreamChunk, ModelToolCall
 from reliability import (
     STATUS_BY_REASON,
     USER_MESSAGE_BY_REASON,
+    AgentActionReceipt,
     AgentRuntimeError,
     AgentTurnOutcome,
     DeadlineExceeded,
@@ -54,6 +55,7 @@ from reliability import (
     ToolExecutionTimeout,
     TurnContext,
     TurnTimeoutExceeded,
+    canonical_json,
     new_id,
     run_with_deadline,
     tool_call_fingerprint,
@@ -233,6 +235,9 @@ class _ModelDecision:
 class _Counters:
     model_requests: int = 0
     tool_calls_executed: int = 0
+    # One receipt per ordinary tool the turn actually executed, in execution
+    # order (PATCH-010-05). Reported only by a completed turn.
+    action_receipts: list[AgentActionReceipt] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -241,7 +246,9 @@ class AgentRunner:
     The caller supplies a *snapshot* of model-facing messages; the runner never
     receives the mutable ``Conversation``. Temporary tool-protocol messages live
     only in a per-turn working transcript and are discarded when the turn ends —
-    the caller persists only a completed outcome's `final_text`.
+    the caller persists only a completed outcome's `final_text`, now alongside a
+    bounded receipt per executed tool (PATCH-010-05) so the *fact* of each action
+    outlives the transcript that carried its payload.
     """
 
     def __init__(
@@ -261,6 +268,7 @@ class AgentRunner:
         clock: Callable[[], float] = time.monotonic,
         id_factory: Callable[[], str] = new_id,
         payload_preview_chars: int = 1000,
+        receipt_argument_chars: int = 500,
         redacted_argument_tools: frozenset[str] = frozenset(),
         control_handler: ControlToolHandler | None = None,
         extra_turn_fields: Callable[[], dict[str, Any]] = lambda: {},
@@ -290,6 +298,11 @@ class AgentRunner:
         self._clock = clock
         self._id_factory = id_factory
         self._payload_preview_chars = payload_preview_chars
+        # The bound on one action receipt's argument preview (PATCH-010-05).
+        # Separate from the trace bound above on purpose: a receipt is semantic
+        # memory the next turn depends on, and it must not shrink, grow, or
+        # vanish because tracing configuration changed.
+        self._receipt_argument_chars = receipt_argument_chars
         # Tools whose arguments are content rather than parameters, and must
         # therefore never be previewed or hashed into the trace (SPEC-016 §15.3).
         # A `sql_query` string is a parameter worth seeing in a trace; a
@@ -425,8 +438,18 @@ class AgentRunner:
             self._emit_turn_finished(outcome)
             raise
 
+        # Only here do the receipts leave the turn: the answer above is the one
+        # the user actually received, so it is the only one whose provenance the
+        # caller may remember (PATCH-010-05). Every failure path above builds its
+        # outcome without them, even when a tool did run before the turn ended.
         outcome = self._outcome(
-            turn_id, start, TerminationReason.FINAL_ANSWER, final_text, counters, None
+            turn_id,
+            start,
+            TerminationReason.FINAL_ANSWER,
+            final_text,
+            counters,
+            None,
+            action_receipts=tuple(counters.action_receipts),
         )
         self._emit_turn_finished(outcome)
         return outcome
@@ -439,6 +462,7 @@ class AgentRunner:
         final_text: str | None,
         counters: _Counters,
         error_message: str | None,
+        action_receipts: tuple[AgentActionReceipt, ...] = (),
     ) -> AgentTurnOutcome:
         return AgentTurnOutcome(
             run_id=self._run_id,
@@ -451,6 +475,7 @@ class AgentRunner:
             model_requests=counters.model_requests + self._routing_model_requests,
             duration_ms=int((self._clock() - start) * 1000),
             error_message=error_message,
+            action_receipts=action_receipts,
         )
 
     def _emit_turn_finished(self, outcome: AgentTurnOutcome) -> None:
@@ -502,6 +527,35 @@ class AgentRunner:
             working_messages[0] = {**working_messages[0], "content": content}
         else:
             working_messages.insert(0, {"role": "system", "content": content})
+
+    def _action_receipt(
+        self, call: ModelToolCall, result: dict, *, redacted: bool
+    ) -> AgentActionReceipt:
+        """One bounded receipt for a tool this turn actually executed.
+
+        Generic by construction (PATCH-010-05): the tool's name, the canonical
+        JSON of the arguments the model chose, and whether the host observed a
+        structured `ok`. No result body, no summarizer, nothing tool-specific —
+        the loop cannot learn what Time, Tracker, SQL, or the sandbox mean.
+
+        A redacted tool keeps its identity and status and loses everything else,
+        including any hash: the trace's privacy boundary is reused as-is rather
+        than a second, weaker one being invented for cross-turn memory.
+        """
+
+        if redacted:
+            preview, truncated = "", False
+        else:
+            encoded = canonical_json(call.arguments)
+            truncated = len(encoded) > self._receipt_argument_chars
+            preview = encoded[: self._receipt_argument_chars]
+        return AgentActionReceipt(
+            tool_name=call.name,
+            arguments_preview=preview,
+            arguments_truncated=truncated,
+            arguments_redacted=redacted,
+            result_ok=bool(result.get("ok")),
+        )
 
     def _drive_loop(
         self,
@@ -822,6 +876,18 @@ class AgentRunner:
                 )
             )
             self._renderer.tool_result(result)
+
+            if not is_control:
+                # The action really happened, so it earns a receipt — success or
+                # structured failure alike (PATCH-010-05). A control tool does
+                # not: it changes *this* turn's own view and is discarded with
+                # it, so remembering it across turns could make a later turn
+                # infer that a skill is still active. The loop applies that rule
+                # generically, through the same `is_control` flag it already
+                # dispatched on; it still knows nothing about any tool's meaning.
+                counters.action_receipts.append(
+                    self._action_receipt(call, result, redacted=redacted)
+                )
 
             if control is not None:
                 # Each field is independent, and None means "unchanged" — a

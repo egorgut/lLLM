@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent import AgentRunner, ControlToolHandler, Renderer, Respond
-from config import MAX_SKILL_ACTIVATIONS_PER_TURN
+from config import ACTION_RECEIPT_ARGUMENT_MAX_CHARS, MAX_SKILL_ACTIVATIONS_PER_TURN
 from conversation import Conversation
 from reliability import (
     STATUS_BY_REASON,
@@ -88,6 +88,7 @@ class SkillTurnOrchestrator:
         clock: Callable[[], float] = time.monotonic,
         id_factory: Callable[[], str] = new_id,
         payload_preview_chars: int = 1000,
+        receipt_argument_chars: int = ACTION_RECEIPT_ARGUMENT_MAX_CHARS,
         on_selection: Callable[[SkillSelection], None] = lambda _selection: None,
         on_turn_context: Callable[[TurnContext], None] = lambda _context: None,
         redacted_argument_tools: frozenset[str] = frozenset(),
@@ -115,6 +116,11 @@ class SkillTurnOrchestrator:
         self._clock = clock
         self._id_factory = id_factory
         self._payload_preview_chars = payload_preview_chars
+        # Passed straight through to every runner: how much of a tool's
+        # arguments one cross-turn action receipt may carry (PATCH-010-05). The
+        # orchestrator has no opinion on it beyond keeping it separate from the
+        # trace bound above.
+        self._receipt_argument_chars = receipt_argument_chars
         self._on_selection = on_selection
         self._on_turn_context = on_turn_context
         self._redacted_argument_tools = redacted_argument_tools
@@ -362,6 +368,7 @@ class SkillTurnOrchestrator:
             clock=self._clock,
             id_factory=self._id_factory,
             payload_preview_chars=self._payload_preview_chars,
+            receipt_argument_chars=self._receipt_argument_chars,
             redacted_argument_tools=self._redacted_argument_tools,
             control_handler=control_handler,
             extra_turn_fields=extra_turn_fields,

@@ -173,6 +173,14 @@ MAX_CONTEXT_MESSAGES = 20
 # Where the persistent conversation history is stored.
 CHAT_HISTORY_PATH = "data/chat_history.json"
 
+# Cross-turn agent action provenance (PATCH-010-05). A completed turn's tool
+# executions leave a bounded, session-only receipt so the next turn can still see
+# *that* a tool ran, without any raw tool payload entering semantic memory.
+# Deliberately separate from TRACE_PAYLOAD_PREVIEW_CHARS below: what the model
+# remembers must not depend on whether tracing happens to be enabled.
+ACTION_RECEIPT_ARGUMENT_MAX_CHARS = 500
+MAX_ACTION_RECEIPTS_IN_CONTEXT = 8
+
 # Bounded agent loop (SPEC-010). The maximum number of tool executions the model
 # may drive within a single user turn. It is a host-owned safety limit: the model
 # can never read or change it, and a request beyond this count is not executed.
