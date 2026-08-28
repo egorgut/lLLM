@@ -162,6 +162,25 @@ class TestDeclaration:
         assert "Analyse sales and revenue data" in description
         assert "Procedure body" not in description
 
+    def test_description_triggers_on_a_capability_gap(self):
+        """PATCH-018-02.
+
+        The original wording triggered on reclassification — "when the work
+        turns out to belong to a different class". Live, that read as false in
+        the case the tool exists for: a correctly routed skill, followed by a
+        step of a different kind. The trigger is now the capability gap, and it
+        says out loud that a correct prior selection is no objection.
+        """
+
+        declaration = build_activate_skill_declaration(skill_registry().catalog())
+        description = declaration["function"]["description"]
+
+        assert "cannot do" in description
+        assert "right one for the work already finished" in description
+        assert "step of a different kind" in description
+        # Replacement semantics stay part of what the model is told.
+        assert "replacing any procedure" in description
+
     def test_empty_registry_produces_no_declaration(self):
         """§7.1/11."""
 
@@ -196,6 +215,26 @@ class TestDeclaration:
             orch, _ = build_orchestrator(routed_to(selected), responder=responder)
             orch.run_turn(conversation_with("hello"))
             assert declared_names(responder, 0)[-1] == ACTIVATE_SKILL_TOOL_NAME
+
+    def test_the_policy_never_promises_a_tool_the_turn_lacks(self):
+        """PATCH-018-02 — the invariant behind the new policy line.
+
+        The policy tells an active skill it can call `activate_skill`. That is
+        only honest because the block is composed for a *selected* skill, which
+        requires a registry entry, which means a declaration exists. Pinned here
+        rather than left to inspection: a future change that composes the block
+        without the declaration must fail this, not reach a live model.
+        """
+
+        for skill in ("tracker_read", "sales_analysis"):
+            responder = ScriptedResponder([ScriptedModelResponse(text="done")])
+            orch, _ = build_orchestrator(routed_to(skill), responder=responder)
+            orch.run_turn(conversation_with("hello"))
+
+            system = system_content(responder, 0)
+            assert "<active_skill_policy>" in system
+            assert ACTIVATE_SKILL_TOOL_NAME in system
+            assert ACTIVATE_SKILL_TOOL_NAME in declared_names(responder, 0)
 
 
 class TestActivationFromNoSkill:
