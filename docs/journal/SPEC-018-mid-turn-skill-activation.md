@@ -464,3 +464,25 @@ The two substantive findings are both negative, and both are kept:
 
 - Implementation: `c6acb0a` — Complete mid-turn skill activation verification (PATCH-018-01)
 - Merge (`--no-ff`): `c3a94dc` — Merge PATCH-018-01: complete skill activation verification
+
+### PATCH-018-02 — Activate a skill on a capability gap
+
+Patch note: `patches/SPEC-018/PATCH-018-02-Activate-Skill-On-Capability-Gap.md`
+
+Standalone journal: [PATCH-018-02](patches/PATCH-018-02-activate-skill-on-capability-gap.md)
+
+This step built the escape hatch and PATCH-018-01 proved it works. What this
+patch fixes is discovery: live, a single-turn two-phase request (summarise
+DEV-498's comments *and* write a CSV) routed to `tracker_read` and the model
+reported the write phase impossible, though `activate_skill` was declared for the
+turn all along. The declaration's trigger asked for a *reclassification* — false
+after a correct selection — and `<active_skill_policy>` asserted the closed tool
+set three times without ever mentioning that the skill can be replaced. The
+trigger is now a capability gap, and the policy says the skill is not the whole
+session. Measured live: 4 of 7 runs activate mid-turn, against 0 of 5 before.
+Mechanism, contracts, tool views, and budgets are unchanged.
+
+#### Commits
+
+- Implementation: `07915f5` — Trigger skill activation on a capability gap (PATCH-018-02)
+- Merge (`--no-ff`): `MERGE_SHA`
