@@ -686,3 +686,23 @@ the counter or the `[time]` footer, no change to how answer segments are
 labelled, no attempt to make `text_chunks()` drop text from a tool-calling
 response — that would change what the user is told about the model's reasoning
 and needs its own patch and its own evidence.
+
+### PATCH-010-05 — Preserve completed tool actions across turns
+
+- **Patch:** [PATCH-010-05](../../patches/SPEC-010/PATCH-010-05-Preserve-Completed-Tool-Actions-Across-Turns.md)
+- **Journal:** [standalone entry](patches/PATCH-010-05-preserve-completed-tool-actions-across-turns.md)
+- **Date:** 2026-08-28
+- **Branch:** patch/PATCH-010-05-preserve-completed-tool-actions-across-turns
+- **Implementation commit:** `41f1272`
+- **Merge commit:** `MERGE_SHA`
+
+#### Reason
+
+This step's transient tool transcript is right about payloads and over-broad
+about facts: once a turn ends, nothing records that a tool ran at all. Live, the
+model called the time tool successfully, answered from it, and on the next turn
+denied ever calling it. Each completed turn now leaves a bounded, session-only
+`AgentActionReceipt` per executed tool, projected into later model context as a
+host-written suffix. Storage schema, `stored_messages`, routing input, and CLI
+output are unchanged. Full details, transcripts, and measurements in the
+standalone journal — this changes model-facing history, so it earned its own.
