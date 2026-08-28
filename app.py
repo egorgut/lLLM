@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cli_activity import ActivityIndicator, format_turn_time
 from config import (
+    ACTION_RECEIPT_ARGUMENT_MAX_CHARS,
     BASELINE_TOOL_NAMES,
     CHAT_HISTORY_PATH,
     DEFAULT_REASONING_MODE,
@@ -665,6 +666,7 @@ def main(argv: list[str] | None = None) -> None:
             agent_turn_timeout_seconds=roles.agent.agent_turn_timeout_seconds,
             trace_sink=trace_sink,
             payload_preview_chars=TRACE_PAYLOAD_PREVIEW_CHARS,
+            receipt_argument_chars=ACTION_RECEIPT_ARGUMENT_MAX_CHARS,
             on_selection=announce_skill,
             max_skill_activations=MAX_SKILL_ACTIVATIONS_PER_TURN,
             baseline_tools=BASELINE_TOOL_NAMES,
@@ -761,7 +763,14 @@ def main(argv: list[str] | None = None) -> None:
             if outcome.status is TurnStatus.COMPLETED:
                 if sandbox is not None:
                     sandbox.workspace.commit()
-                conversation.add_assistant_message(outcome.final_text)
+                # The answer, plus the host's own record of the tools it was
+                # grounded in (PATCH-010-05). Only `stored_messages` is saved, so
+                # the receipts stay in this process's memory: the next turn can
+                # see that a tool really ran, and a restart honestly forgets
+                # rather than reconstructing something it never observed.
+                conversation.add_assistant_message(
+                    outcome.final_text, outcome.action_receipts
+                )
                 store.save(conversation.stored_messages)
                 # The final answer is streamed without a trailing newline, so
                 # terminate it before the footer below; every other branch
