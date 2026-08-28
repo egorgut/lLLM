@@ -485,4 +485,4 @@ Mechanism, contracts, tool views, and budgets are unchanged.
 #### Commits
 
 - Implementation: `07915f5` — Trigger skill activation on a capability gap (PATCH-018-02)
-- Merge (`--no-ff`): `MERGE_SHA`
+- Merge (`--no-ff`): `3acc3f9` — Merge PATCH-018-02: activate a skill on a capability gap

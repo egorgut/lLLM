@@ -5,7 +5,7 @@
 - **Date:** 2026-08-28
 - **Branch:** patch/PATCH-018-02-activate-skill-on-capability-gap
 - **Implementation commit:** `07915f5`
-- **Merge commit:** `MERGE_SHA`
+- **Merge commit:** `3acc3f9`
 
 ## The observation
 
