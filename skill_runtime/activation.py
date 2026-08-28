@@ -36,10 +36,17 @@ from tracing import NullTraceSink, TraceSink, build_event
 # never be looking at two different things under one name.
 ACTIVATE_SKILL_TOOL_NAME = "activate_skill"
 
+# The trigger is a *capability gap*, not a reclassification (PATCH-018-02). The
+# original wording — "when the work turns out to belong to a different class" —
+# read as false in the case that needs this tool most: a correct selection
+# followed by a step of a different kind. A model whose routing was right then
+# had no reason to call it, and reported the second phase impossible instead.
 _DESCRIPTION = (
     "Load the working procedure for one class of task, replacing any procedure "
-    "currently active. Call this when the work turns out to belong to a "
-    "different class than the one currently loaded."
+    "currently active. Call this whenever the next step needs something the "
+    "tools you have right now cannot do — including when the loaded procedure "
+    "was the right one for the work already finished and the task has simply "
+    "moved on to a step of a different kind."
 )
 
 
