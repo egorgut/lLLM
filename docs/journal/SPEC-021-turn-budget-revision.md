@@ -3,8 +3,8 @@
 - **Spec:** [SPEC-021](../../specs/SPEC-021-Turn-Budget-Revision.md)
 - **Date:** 2026-08-30
 - **Branch:** feature/SPEC-021-turn-budget-revision
-- **Implementation commit:** `<pending>`
-- **Merge commit:** `<pending>`
+- **Implementation commit:** `44d84e1`
+- **Merge commit:** `a448205`
 
 ## Hypothesis / intent
 
