@@ -30,9 +30,15 @@ class TurnStatus(StrEnum):
 
 class TerminationReason(StrEnum):
     FINAL_ANSWER = "final_answer"
+    # A turn whose tool budget ran out and which answered anyway (SPEC-021 §4.3).
+    # It replaces SPEC-010's TOOL_CALL_LIMIT rather than joining it: no path
+    # terminates on a spent budget any more, so keeping the old name would leave
+    # dead vocabulary that a trace reader could not tell from a live one. It is a
+    # distinct reason rather than FINAL_ANSWER because the answer was cut short,
+    # and that fact must stay visible (§8.5).
+    BUDGET_EXHAUSTED = "budget_exhausted"
     EMPTY_MODEL_RESPONSE = "empty_model_response"
     PARALLEL_TOOL_CALLS = "parallel_tool_calls"
-    TOOL_CALL_LIMIT = "tool_call_limit"
     REPEATED_TOOL_CALL = "repeated_tool_call"
     MODEL_TIMEOUT = "model_timeout"
     TOOL_TIMEOUT = "tool_timeout"
@@ -54,9 +60,11 @@ class TerminationReason(StrEnum):
 # agent-turn contract"). A reason never appears with more than one status.
 STATUS_BY_REASON: dict[TerminationReason, TurnStatus] = {
     TerminationReason.FINAL_ANSWER: TurnStatus.COMPLETED,
+    # Completed, not stopped: the user received an answer grounded in real work,
+    # so app.py persists it exactly like any other completed turn (SPEC-021 §4.3).
+    TerminationReason.BUDGET_EXHAUSTED: TurnStatus.COMPLETED,
     TerminationReason.EMPTY_MODEL_RESPONSE: TurnStatus.FAILED,
     TerminationReason.PARALLEL_TOOL_CALLS: TurnStatus.STOPPED,
-    TerminationReason.TOOL_CALL_LIMIT: TurnStatus.STOPPED,
     TerminationReason.REPEATED_TOOL_CALL: TurnStatus.STOPPED,
     TerminationReason.MODEL_TIMEOUT: TurnStatus.TIMED_OUT,
     TerminationReason.TOOL_TIMEOUT: TurnStatus.TIMED_OUT,
@@ -81,6 +89,10 @@ STATUS_BY_REASON: dict[TerminationReason, TurnStatus] = {
 # limit) are formatted by the caller; this table holds only the static ones.
 USER_MESSAGE_BY_REASON: dict[TerminationReason, str | None] = {
     TerminationReason.FINAL_ANSWER: None,
+    # Like final_answer: a turn that answered is not an error, however short the
+    # answer had to be. What went unfinished is said by the model, in its own
+    # answer, rather than by a fixed host banner (SPEC-021 §4.6).
+    TerminationReason.BUDGET_EXHAUSTED: None,
     TerminationReason.EMPTY_MODEL_RESPONSE: "Model returned an empty response.",
     TerminationReason.PARALLEL_TOOL_CALLS: "Parallel tool calls are not supported.",
     TerminationReason.MODEL_TIMEOUT: "Agent turn timed out while waiting for the model.",
@@ -318,6 +330,7 @@ def validate_reliability_config(
     agent_turn_timeout_seconds: float,
     max_tool_calls: int,
     max_identical_tool_calls: int,
+    max_control_calls: int | None = None,
 ) -> None:
     """Reject an internally incoherent host configuration at startup (§10).
 
@@ -347,6 +360,12 @@ def validate_reliability_config(
         raise ValueError(
             "max_identical_tool_calls must be at least 1, got "
             f"{max_identical_tool_calls}."
+        )
+    # Optional because a caller without a control-tool handler has no such budget
+    # to state (app.py validates each model profile before any handler exists).
+    if max_control_calls is not None and max_control_calls < 1:
+        raise ValueError(
+            f"max_control_calls must be at least 1, got {max_control_calls}."
         )
     smallest_component_timeout = min(
         model_request_timeout_seconds, tool_execution_timeout_seconds

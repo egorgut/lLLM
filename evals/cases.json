@@ -353,6 +353,9 @@
             "expression": "4"
           }
         }
+      },
+      {
+        "text": "I ran the calculator four times and used up this turn's tool budget before I could finish. Here is what I have: every call returned 0. What I could not complete: the remaining steps of the calculation. Ask again and I will continue from here."
       }
     ],
     "tool_results": {
@@ -362,8 +365,15 @@
       }
     },
     "expectation": {
-      "status": "stopped",
-      "reason": "tool_call_limit",
+      "status": "completed",
+      "reason": "budget_exhausted",
+      "max_tool_calls": 4,
+      "min_tool_calls": 4,
+      "answer_contains": [
+        "could not complete"
+      ]
+    },
+    "runner_overrides": {
       "max_tool_calls": 4
     }
   },
@@ -937,6 +947,67 @@
       "status": "completed",
       "reason": "final_answer",
       "max_tool_calls": 0
+    }
+  },
+  {
+    "id": "activation-budget-guard-001",
+    "category": "control_call_budget_guard",
+    "modes": [
+      "scripted"
+    ],
+    "skill_case": true,
+    "prompt": "Look at the sales data, the tracker issues, and then write it all up in a file.",
+    "route": [
+      "{\"skill\": null, \"reason\": \"request spans several unrelated areas\"}"
+    ],
+    "script": [
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "sales_analysis"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "tracker_read"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "code_workspace"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "name": "activate_skill",
+          "arguments": {
+            "name": "sales_analysis"
+          }
+        }
+      },
+      {
+        "text": "I spent this turn's budget switching procedures instead of doing the work, so I could not complete any part of the request. Nothing was written. Tell me which part you want first and I will do that one."
+      }
+    ],
+    "expectation": {
+      "expected_selection": null,
+      "selection_source": "model",
+      "expected_final_skill": "tracker_read",
+      "expected_activations": 2,
+      "status": "completed",
+      "reason": "budget_exhausted",
+      "max_tool_calls": 0,
+      "answer_contains": [
+        "could not complete"
+      ]
     }
   },
   {
@@ -2082,6 +2153,9 @@
             "source": "raise SystemExit(5)\n"
           }
         }
+      },
+      {
+        "text": "I used up this turn's tool budget on four sandbox attempts and the script still fails. What I have: the interpreter reports a SyntaxError on the `for row in rows` line. What I could not complete: the report itself was never produced. Ask again and I will fix that line first."
       }
     ],
     "tool_results": {
@@ -2097,8 +2171,15 @@
     "expectation": {
       "expected_selection": "code_workspace",
       "selection_source": "explicit",
-      "status": "stopped",
-      "reason": "tool_call_limit",
+      "status": "completed",
+      "reason": "budget_exhausted",
+      "max_tool_calls": 4,
+      "min_tool_calls": 4,
+      "answer_contains": [
+        "could not complete"
+      ]
+    },
+    "runner_overrides": {
       "max_tool_calls": 4
     }
   },

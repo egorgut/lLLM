@@ -168,6 +168,7 @@ class TestCasesFile:
             "mcp_time",
             "repetition_guard",
             "tool_call_budget_guard",
+            "control_call_budget_guard",
             "timeout",
             "skill_explicit",
             "skill_auto",

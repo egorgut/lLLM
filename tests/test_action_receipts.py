@@ -17,7 +17,7 @@ from pathlib import Path
 from agent import AgentRunner
 from config import MAX_ACTION_RECEIPTS_IN_CONTEXT
 from conversation import Conversation
-from reliability import AgentActionReceipt, TurnStatus
+from reliability import AgentActionReceipt, TerminationReason, TurnStatus
 from skill_runtime.activation import ACTIVATE_SKILL_TOOL_NAME
 from skill_runtime.models import SkillSelection, SkillSpec
 from skill_runtime.orchestrator import SkillTurnOrchestrator
@@ -162,12 +162,17 @@ class TestCollection:
         )
 
     def test_rejected_call_is_never_receipted(self):
-        """A call stopped by policy before dispatch executed nothing."""
+        """A call stopped by policy before dispatch executed nothing.
+
+        Under SPEC-021 the turn survives the refusal and completes, so this is
+        now the sharper statement of the rule: the executed call is receipted and
+        the refused one is not, in the same outcome.
+        """
 
         call = make_tool_call("sql_query", {"query": "SELECT 1"})
         responder = ScriptedResponder(
             [ScriptedModelResponse(tool_calls=[call])] * 2
-            + [ScriptedModelResponse(text="unreachable")]
+            + [ScriptedModelResponse(text="I could not run the second query.")]
         )
         executor = FakeToolExecutor({"sql_query": ok(rows=[])})
 
@@ -175,11 +180,12 @@ class TestCollection:
             BASE_MESSAGES
         )
 
-        # The first call ran (1 of 1); the second was refused before dispatch and
-        # stopped the turn, so the whole turn reports nothing.
-        assert outcome.status is TurnStatus.STOPPED
+        # The first call ran (1 of 1); the second was refused before dispatch.
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.reason is TerminationReason.BUDGET_EXHAUSTED
         assert outcome.tool_calls_executed == 1
-        assert outcome.action_receipts == ()
+        assert len(outcome.action_receipts) == 1
+        assert executor.calls == [("sql_query", {"query": "SELECT 1"})]
 
 
 class TestRollback:

@@ -181,9 +181,32 @@ CHAT_HISTORY_PATH = "data/chat_history.json"
 ACTION_RECEIPT_ARGUMENT_MAX_CHARS = 500
 MAX_ACTION_RECEIPTS_IN_CONTEXT = 8
 
-# Bounded agent loop (SPEC-010). The maximum number of tool executions the model
-# may drive within a single user turn. It is a host-owned safety limit: the model
-# can never read or change it, and a request beyond this count is not executed.
+# Bounded agent loop (SPEC-010), re-derived from measurement in SPEC-021. The
+# maximum number of *work* tool executions the model may drive within a single
+# user turn. Host-owned: the model can never read or change it, and a request
+# beyond this count is not executed. Since SPEC-021 exceeding it is no longer
+# terminal — the turn makes one final, tool-less request and answers with what it
+# has (agent.py, TOOL_BUDGET_EXHAUSTED_POLICY).
+#
+# SPEC-010 set this to 4 with no derivation, which is why SPEC-021 exists. The
+# rule, stated before the data was read, is recorded in
+# docs/journal/SPEC-021-turn-budget-revision.md:
+#
+#   the budget covers the 95th percentile of tool_calls_executed over completed
+#   turns, on the heavier subpopulation (skill-active turns), rounded up; where
+#   history is right-censored at the current limit, an uncensored scenario
+#   corpus is authoritative.
+#
+# Re-run it with `python scripts/analyze_turn_budget.py`. Measured over 221
+# completed turns of trace history plus a scenario corpus run at a temporarily
+# raised budget of 12, the rule yields **4** — the value already in place. The
+# number was not what was broken. What was broken was what it counted (SPEC-018
+# charged skill activations against it, so a two-phase request spent 2 of its 4
+# calls on orchestration and died before doing the work) and what happened when
+# it ran out (the user received nothing). SPEC-021 fixes both and leaves the
+# number alone rather than raising it on a hunch: see MAX_SKILL_ACTIVATIONS_PER_TURN
+# below, and note that raising this constant raises worst-case model requests,
+# latency and accumulated tool payload in direct proportion.
 MAX_TOOL_CALLS_PER_TURN = 4
 
 # Agent reliability (SPEC-011). Host-owned time limits and repeated-call policy.
@@ -193,7 +216,13 @@ MAX_TOOL_CALLS_PER_TURN = 4
 #
 # The model-latency deadlines (request, whole turn, routing) moved into
 # ModelProfile above (SPEC-017), because their correct value depends on the
-# model. What stays here bounds *host* work, which no model choice changes.
+# model. What stays *here* bounds host work, which no model choice changes —
+# with one correction SPEC-021 §2.4 had to make: that classification was applied
+# to MAX_TOOL_CALLS_PER_TURN too, and for that constant it is false. The loop
+# continues through exactly one path, an executed tool call, so the budget is
+# also the bound on model requests per turn, and therefore on worst-case latency
+# and on how much tool payload accumulates in the final request. It is measured
+# and justified above rather than treated as a pure host-side counter.
 TOOL_EXECUTION_TIMEOUT_SECONDS = 30
 MAX_IDENTICAL_TOOL_CALLS = 2
 
@@ -302,11 +331,22 @@ MAX_SKILL_DESCRIPTION_CHARS = 200
 
 # Mid-turn skill activation (SPEC-018). How many times one turn may swap its
 # active skill through the host-owned `activate_skill` tool; the router's own
-# initial selection does not count against it. This is a second, independent
-# bound: an activation *also* consumes one of MAX_TOOL_CALLS_PER_TURN above,
-# because it is a model decision that cost a model request, and hiding it from
-# that budget would let a thrashing model run unbounded. Exceeding this limit is
+# initial selection does not count against it. Exceeding this limit is
 # recoverable — the turn continues under the skill already active.
+#
+# SPEC-018 additionally charged an activation against MAX_TOOL_CALLS_PER_TURN,
+# reasoning that hiding it would let a thrashing model run unbounded. SPEC-021
+# §4.4 keeps the concern and drops the charge: an activation is orchestration,
+# not work, and taxing the work budget made a turn's capacity depend on how well
+# the router happened to guess (PATCH-018-02 run 5 died of exactly that).
+#
+# What bounds a thrashing model instead is the agent loop's own control-call
+# budget, which it derives as this value **+ 1**. The +1 is not slack: this
+# counter is *not* incremented when an attempt is refused (see
+# skill_runtime/activation.py), so bounding attempts by this number alone would
+# leave the handler's recoverable `activation_limit` answer unreachable. The
+# loop's closed-form bound on model requests per turn is written out in
+# agent.py, beside the counters it is built from.
 MAX_SKILL_ACTIVATIONS_PER_TURN = 2
 
 # Host baseline tools (PATCH-012-02). Tools that stay in the model-facing tool

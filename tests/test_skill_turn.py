@@ -323,9 +323,10 @@ def test_tool_call_budget_still_applies_within_skill():
         [
             ScriptedModelResponse(tool_calls=[make_tool_call("sql_query", {"q": "1"})]),
             ScriptedModelResponse(tool_calls=[make_tool_call("python_calculate", {"expression": "2"})]),
+            ScriptedModelResponse(text="I could not finish the calculation."),
         ]
     )
-    orch, _ = build_orchestrator(
+    orch, executor = build_orchestrator(
         router,
         responder=responder,
         handlers={
@@ -335,8 +336,11 @@ def test_tool_call_budget_still_applies_within_skill():
         max_tool_calls=1,
     )
     result = orch.run_turn(conversation_with("revenue"))
-    assert result.outcome.status is TurnStatus.STOPPED
-    assert result.outcome.reason is TerminationReason.TOOL_CALL_LIMIT
+    # The budget still refuses the second call (SPEC-021 §4.1 leaves the refusal
+    # alone); the turn now answers with what it has instead of vanishing.
+    assert result.outcome.status is TurnStatus.COMPLETED
+    assert result.outcome.reason is TerminationReason.BUDGET_EXHAUSTED
+    assert [name for name, _ in executor.calls] == ["sql_query"]
 
 
 def test_on_selection_called_with_selection():

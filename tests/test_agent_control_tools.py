@@ -115,7 +115,9 @@ class TestControlDispatch:
 
         runner.run_turn(BASE_MESSAGES)
 
-        assert renderer.tool_calls == [(CONTROL_TOOL, 1, 4)]
+        # A control call is rendered against the budget it is actually charged
+        # against — max_control_calls, not the work budget (SPEC-021 §4.6).
+        assert renderer.tool_calls == [(CONTROL_TOOL, 1, 3)]
         assert renderer.tool_results == [{"ok": True}]
 
 
@@ -153,26 +155,35 @@ class TestPreDispatchPoliciesStillApply:
         # max_identical_tool_calls=2: the third one never reaches the handler.
         assert len(handler.calls) == 2
 
-    def test_tool_call_budget_stops_a_control_call(self):
+    def test_the_control_budget_stops_a_control_call(self):
         handler = RecordingControlHandler()
         # Distinct arguments each time, so the repetition guard never fires and
         # the budget is the policy under test.
         responder = ScriptedResponder(
-            [ScriptedModelResponse(tool_calls=[control_call(name=str(i))]) for i in range(4)]
+            # Two fit the budget, the third is refused; the fourth response is
+            # the forced answer.
+            [ScriptedModelResponse(tool_calls=[control_call(name=str(i))]) for i in range(3)]
+            + [ScriptedModelResponse(text="out of switches")]
         )
-        runner = make_runner(responder, control_handler=handler, max_tool_calls=2)
+        runner = make_runner(responder, control_handler=handler, max_control_calls=2)
 
         outcome = runner.run_turn(BASE_MESSAGES)
 
-        assert outcome.status is TurnStatus.STOPPED
-        assert outcome.reason is TerminationReason.TOOL_CALL_LIMIT
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.reason is TerminationReason.BUDGET_EXHAUSTED
         assert len(handler.calls) == 2
 
 
-class TestControlCallsCountAgainstTheBudget:
-    """§7.1/9 — an activation is a model decision and is counted as one."""
+class TestControlCallsHaveTheirOwnBudget:
+    """SPEC-021 §4.4 — an activation is orchestration, and is not charged as work.
 
-    def test_every_control_call_increments_tool_calls_executed(self):
+    SPEC-018 charged it against `MAX_TOOL_CALLS_PER_TURN` on the reasoning that
+    hiding it would let a thrashing model run unbounded. That concern is real and
+    is answered here by a second bound rather than by taxing the work budget: a
+    turn's capacity for work no longer depends on how well the router guessed.
+    """
+
+    def test_control_calls_do_not_consume_the_work_budget(self):
         handler = RecordingControlHandler()
         responder = ScriptedResponder(
             [
@@ -186,26 +197,103 @@ class TestControlCallsCountAgainstTheBudget:
         outcome = runner.run_turn(BASE_MESSAGES)
 
         assert outcome.status is TurnStatus.COMPLETED
-        assert outcome.tool_calls_executed == 2
+        assert outcome.reason is TerminationReason.FINAL_ANSWER
+        assert outcome.tool_calls_executed == 0
+        assert len(handler.calls) == 2
 
-    def test_control_and_ordinary_calls_share_one_budget(self):
+    def test_a_full_work_budget_is_still_available_after_activations(self):
+        """The PATCH-018-02 coupling, gone: activating no longer costs a step."""
+
         handler = RecordingControlHandler()
         call = make_tool_call("python_calculate", {"expression": "1+1"})
         responder = ScriptedResponder(
             [
                 ScriptedModelResponse(tool_calls=[control_call(name="a")]),
                 ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(tool_calls=[make_tool_call("python_calculate", {"expression": "2"})]),
                 ScriptedModelResponse(text="done"),
             ]
         )
         executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
-        runner = make_runner(responder, executor, control_handler=handler)
+        runner = make_runner(
+            responder, executor, control_handler=handler, max_tool_calls=2
+        )
 
         outcome = runner.run_turn(BASE_MESSAGES)
 
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.reason is TerminationReason.FINAL_ANSWER
+        # Both work calls ran even though an activation happened first.
         assert outcome.tool_calls_executed == 2
         assert len(handler.calls) == 1
-        assert [name for name, _ in executor.calls] == ["python_calculate"]
+        assert len(executor.calls) == 2
+
+    def test_the_two_budgets_are_independent(self):
+        """A spent work budget does not stop a control call, and vice versa."""
+
+        handler = RecordingControlHandler()
+        call = make_tool_call("python_calculate", {"expression": "1+1"})
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[call]),
+                ScriptedModelResponse(tool_calls=[control_call(name="a")]),
+                ScriptedModelResponse(text="done"),
+            ]
+        )
+        executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+        runner = make_runner(
+            responder, executor, control_handler=handler, max_tool_calls=1
+        )
+
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.reason is TerminationReason.FINAL_ANSWER
+        assert len(handler.calls) == 1
+
+    def test_the_loop_is_bounded_by_arithmetic_under_an_adversarial_script(self):
+        """SPEC-021 §7.2/9 — the closed-form maximum on model requests holds.
+
+        The script asks for a tool at every single opportunity, alternating
+        control and work calls with distinct arguments so neither the repetition
+        guard nor either budget's own refusal can be avoided.
+        """
+
+        max_tool_calls, max_control_calls = 3, 2
+        handler = RecordingControlHandler()
+        executor = FakeToolExecutor({"python_calculate": lambda a: {"ok": True}})
+
+        counter = iter(range(1000))
+
+        def responder(messages, tools):
+            n = next(counter)
+            if not list(tools):
+                # The forced request: the only way this turn can end.
+                return ScriptedModelResponse(text="stopping here")
+            call = (
+                control_call(name=f"c{n}")
+                if n % 2
+                else make_tool_call("python_calculate", {"expression": str(n)})
+            )
+            return ScriptedModelResponse(tool_calls=[call])
+
+        runner = make_runner(
+            responder,
+            executor,
+            control_handler=handler,
+            max_tool_calls=max_tool_calls,
+            max_control_calls=max_control_calls,
+        )
+        outcome = runner.run_turn(BASE_MESSAGES)
+
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.reason is TerminationReason.BUDGET_EXHAUSTED
+        # model requests in the loop
+        #   <= max_tool_calls + max_control_calls + 1 (the refused step) + 1 (forced)
+        bound = max_tool_calls + max_control_calls + 2
+        assert outcome.model_requests <= bound
+        assert len(executor.calls) <= max_tool_calls
+        assert len(handler.calls) <= max_control_calls
 
 
 class TestViewReplacement:

@@ -151,14 +151,17 @@ class TestLoopGuards:
         responder = ScriptedResponder(
             [
                 ScriptedModelResponse(tool_calls=[sandbox_call(f"print({n})")])
-                for n in range(6)
+                for n in range(5)
             ]
+            + [ScriptedModelResponse(text="The script still fails; I ran out of attempts.")]
         )
 
         outcome = run(harness, build_runner(harness, responder))
 
-        assert outcome.status is TurnStatus.STOPPED
-        assert outcome.reason is TerminationReason.TOOL_CALL_LIMIT
+        # The fifth call is still never dispatched. What changed (SPEC-021 §4.1)
+        # is that the turn ends with an answer rather than with nothing.
+        assert outcome.status is TurnStatus.COMPLETED
+        assert outcome.reason is TerminationReason.BUDGET_EXHAUSTED
         assert outcome.tool_calls_executed == 4
 
     def test_the_handler_refuses_to_start_near_the_deadline(self, tmp_path):

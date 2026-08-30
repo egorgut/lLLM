@@ -564,13 +564,15 @@ class TestRecoverableErrors:
 
         assert result.activations == 2
         assert result.final_skill == "tracker_read"
-        assert result.outcome.tool_calls_executed == 2
+        # Two activations, no work: they are counted by the activation cap, not
+        # by the work budget (SPEC-021 §4.4).
+        assert result.outcome.tool_calls_executed == 0
 
 
 class TestBudgets:
-    """§7.1/9 — an activation costs one tool call like any other decision."""
+    """SPEC-021 §4.4 — an activation is orchestration and costs no work call."""
 
-    def test_activations_count_against_the_tool_call_budget(self):
+    def test_activations_do_not_consume_the_tool_call_budget(self):
         responder = ScriptedResponder(
             [
                 ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
@@ -580,9 +582,10 @@ class TestBudgets:
                 ScriptedModelResponse(
                     tool_calls=[make_tool_call("python_calculate", {"expression": "2"})]
                 ),
+                ScriptedModelResponse(text="done"),
             ]
         )
-        orch, _ = build_orchestrator(
+        orch, executor = build_orchestrator(
             routed_to(None),
             responder=responder,
             handlers={
@@ -594,10 +597,97 @@ class TestBudgets:
 
         result = orch.run_turn(conversation_with("revenue"))
 
-        assert result.outcome.status is TurnStatus.STOPPED
-        assert result.outcome.reason is TerminationReason.TOOL_CALL_LIMIT
-        # activation + sql_query filled the budget; python_calculate never ran.
+        # Under SPEC-018 the activation ate one of the two calls and
+        # python_calculate never ran. Both work calls now fit.
+        assert result.outcome.status is TurnStatus.COMPLETED
+        assert result.outcome.reason is TerminationReason.FINAL_ANSWER
         assert result.outcome.tool_calls_executed == 2
+        assert [name for name, _ in executor.calls] == ["sql_query", "python_calculate"]
+
+    def test_a_spent_work_budget_answers_instead_of_stopping(self):
+        """SPEC-021 §4.1, through the real activation handler."""
+
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(
+                    tool_calls=[make_tool_call("sql_query", {"q": "1"})]
+                ),
+                ScriptedModelResponse(
+                    tool_calls=[make_tool_call("sql_query", {"q": "2"})]
+                ),
+                ScriptedModelResponse(text="I ran out of tool calls before finishing."),
+            ]
+        )
+        orch, executor = build_orchestrator(
+            routed_to(None),
+            responder=responder,
+            handlers={"sql_query": lambda a: {"ok": True}},
+            max_tool_calls=1,
+        )
+
+        result = orch.run_turn(conversation_with("revenue"))
+
+        assert result.outcome.status is TurnStatus.COMPLETED
+        assert result.outcome.reason is TerminationReason.BUDGET_EXHAUSTED
+        assert result.outcome.final_text == "I ran out of tool calls before finishing."
+        assert result.activations == 1
+        assert len(executor.calls) == 1
+
+    def test_the_activation_limit_is_still_recoverable(self):
+        """SPEC-018 §4.7 survives: the third attempt is refused, not fatal.
+
+        The loop's control budget is deliberately one wider than the activation
+        cap, so the handler's own recoverable `activation_limit` result stays
+        reachable rather than becoming dead code (SPEC-021 §4.4).
+        """
+
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(tool_calls=[activate("tracker_read")]),
+                ScriptedModelResponse(tool_calls=[activate("code_workspace")]),
+                ScriptedModelResponse(text="continuing with what is loaded"),
+            ]
+        )
+        orch, _ = build_orchestrator(
+            routed_to(None), responder=responder, max_skill_activations=2
+        )
+
+        result = orch.run_turn(conversation_with("hello"))
+
+        assert result.outcome.status is TurnStatus.COMPLETED
+        assert result.outcome.reason is TerminationReason.FINAL_ANSWER
+        assert result.activations == 2
+        assert result.final_skill == "tracker_read"
+
+    def test_a_fourth_activation_attempt_exceeds_the_control_budget(self):
+        """SPEC-021 §4.4 — what actually bounds a thrashing router.
+
+        `MAX_SKILL_ACTIVATIONS_PER_TURN` cannot do this on its own: the handler
+        refuses without incrementing its counter, so attempt after attempt would
+        be free. The loop's own control-call budget is what closes the loop.
+        """
+
+        responder = ScriptedResponder(
+            [
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(tool_calls=[activate("tracker_read")]),
+                ScriptedModelResponse(tool_calls=[activate("code_workspace")]),
+                ScriptedModelResponse(tool_calls=[activate("sales_analysis")]),
+                ScriptedModelResponse(text="I kept switching and did no work."),
+            ]
+        )
+        orch, executor = build_orchestrator(
+            routed_to(None), responder=responder, max_skill_activations=2
+        )
+
+        result = orch.run_turn(conversation_with("hello"))
+
+        assert result.outcome.status is TurnStatus.COMPLETED
+        assert result.outcome.reason is TerminationReason.BUDGET_EXHAUSTED
+        assert result.activations == 2
+        assert executor.calls == []
 
 
 class TestTracing:
