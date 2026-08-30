@@ -79,6 +79,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # deadlines regardless of --profile (SPEC-017 §4.3): its committed results must
 # stay comparable across runs, and its scripted doubles have no latency at all.
 SCRIPTED_PROFILE = MODEL_PROFILES["fast"]
+# The tool-call budget is pinned for the same reason and by the same rule
+# (SPEC-021 §4.5). It is deliberately *not* read from config: SPEC-021 re-derived
+# the global value from measurement and future steps may re-derive it again, and a
+# scripted result that silently changes meaning when a constant moves is not a
+# regression test. Cases that exercise the budget pin it again per case through
+# `runner_overrides`, so this is the default rather than the only statement of it.
+SCRIPTED_MAX_TOOL_CALLS = 4
 DEFAULT_CASES_PATH = PROJECT_ROOT / "evals" / "cases.json"
 RESULTS_DIR = PROJECT_ROOT / "data" / "evals"
 SCHEMA_VERSION = 1
@@ -296,7 +303,7 @@ def run_scripted_case(case: dict[str, Any]) -> CaseResult:
     )
 
     runner_config = dict(
-        max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
+        max_tool_calls=SCRIPTED_MAX_TOOL_CALLS,
         max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
         model_request_timeout_seconds=SCRIPTED_PROFILE.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
@@ -376,13 +383,16 @@ def run_scripted_skill_case(case: dict[str, Any]) -> CaseResult:
         renderer_factory=RecordingRenderer,
         default_tools=tool_registry.to_ollama_tools(),
         run_id="eval-scripted",
-        max_tool_calls=MAX_TOOL_CALLS_PER_TURN,
         max_identical_tool_calls=MAX_IDENTICAL_TOOL_CALLS,
         model_request_timeout_seconds=SCRIPTED_PROFILE.model_request_timeout_seconds,
         tool_execution_timeout_seconds=TOOL_EXECUTION_TIMEOUT_SECONDS,
         agent_turn_timeout_seconds=SCRIPTED_PROFILE.agent_turn_timeout_seconds,
         trace_sink=NullTraceSink(),
         baseline_tools=BASELINE_TOOL_NAMES,
+        # Same per-case escape hatch the non-skill scripted path has always had.
+        # A skill case that pins the budget it is testing must not silently
+        # inherit the global one (SPEC-021 §4.7).
+        **({"max_tool_calls": SCRIPTED_MAX_TOOL_CALLS} | case.get("runner_overrides", {})),
     )
 
     conversation = Conversation()

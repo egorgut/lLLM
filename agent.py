@@ -231,10 +231,47 @@ class _ModelDecision:
         }
 
 
+# The host block appended for the forced answer (SPEC-021 §4.2). It lives here
+# rather than in `prompts.py` because it is loop policy, not tool guidance: the
+# loop owns the budget, and `agent.py` deliberately imports no tool prompt text.
+# Shaped like `<active_skill_policy>` so every host-owned block the model sees
+# reads the same way.
+#
+# The instruction alone is *not* what keeps this path from recursing — the forced
+# request declares no tools at all, which is a structural guarantee rather than a
+# request for cooperation. This text only shapes the answer.
+TOOL_BUDGET_EXHAUSTED_POLICY = (
+    "<tool_budget_policy>\n"
+    "- The tool budget for this turn is spent. No tools are available for this "
+    "response.\n"
+    "- Answer now, using only what you already have.\n"
+    "- State plainly what you could not complete and what remains to be done, so "
+    "the user can ask for the rest in a new turn.\n"
+    "- Do not claim you completed work you did not complete.\n"
+    "</tool_budget_policy>"
+)
+
+
 @dataclass
 class _Counters:
     model_requests: int = 0
     tool_calls_executed: int = 0
+    # Control-tool *attempts*, counted separately from work (SPEC-021 §4.4). An
+    # activation is orchestration, not work, so charging it against the work
+    # budget made a turn's capacity depend on how well the router guessed. It
+    # still has to be bounded, and this is the bound: the handler's own
+    # MAX_SKILL_ACTIVATIONS_PER_TURN cannot do it, because a refused attempt
+    # returns a recoverable result *without* incrementing that counter, so
+    # attempts would otherwise be free.
+    #
+    # Together the two budgets close the loop by arithmetic, not by hope:
+    #
+    #   model requests in the loop <= max_tool_calls      (work)
+    #                              +  max_control_calls   (orchestration)
+    #                              +  1  (the step whose call was refused)
+    #                              +  1  (the forced answer, which declares
+    #                                     no tools and so cannot recurse)
+    control_calls: int = 0
     # One receipt per ordinary tool the turn actually executed, in execution
     # order (PATCH-010-05). Reported only by a completed turn.
     action_receipts: list[AgentActionReceipt] = field(default_factory=list)
@@ -260,6 +297,11 @@ class AgentRunner:
         *,
         run_id: str,
         max_tool_calls: int,
+        # Mirrors MAX_SKILL_ACTIVATIONS_PER_TURN + 1, the way the timeouts below
+        # mirror their config defaults. The +1 is deliberate: it leaves the
+        # activation handler's own recoverable "activation_limit" answer
+        # reachable instead of turning it into dead code (SPEC-021 §4.4).
+        max_control_calls: int = 3,
         max_identical_tool_calls: int = 2,
         model_request_timeout_seconds: float = 120,
         tool_execution_timeout_seconds: float = 30,
@@ -282,6 +324,7 @@ class AgentRunner:
             agent_turn_timeout_seconds=agent_turn_timeout_seconds,
             max_tool_calls=max_tool_calls,
             max_identical_tool_calls=max_identical_tool_calls,
+            max_control_calls=max_control_calls,
         )
         self._respond = respond
         self._executor = executor
@@ -289,6 +332,7 @@ class AgentRunner:
         self._renderer = renderer
         self._run_id = run_id
         self._max_tool_calls = max_tool_calls
+        self._max_control_calls = max_control_calls
         self._max_identical_tool_calls = max_identical_tool_calls
         self._model_request_timeout_seconds = model_request_timeout_seconds
         self._tool_execution_timeout_seconds = tool_execution_timeout_seconds
@@ -397,6 +441,7 @@ class AgentRunner:
                 selected_skill=selected_skill,
                 limits={
                     "max_tool_calls": self._max_tool_calls,
+                    "max_control_calls": self._max_control_calls,
                     "max_identical_tool_calls": self._max_identical_tool_calls,
                     "model_timeout_seconds": self._model_request_timeout_seconds,
                     "tool_timeout_seconds": self._tool_execution_timeout_seconds,
@@ -406,7 +451,7 @@ class AgentRunner:
         )
 
         try:
-            final_text = self._drive_loop(
+            final_text, reason = self._drive_loop(
                 messages, turn_id, deadline, counters, system_suffix
             )
         except AgentRuntimeError as error:
@@ -445,7 +490,7 @@ class AgentRunner:
         outcome = self._outcome(
             turn_id,
             start,
-            TerminationReason.FINAL_ANSWER,
+            reason,
             final_text,
             counters,
             None,
@@ -564,17 +609,27 @@ class AgentRunner:
         deadline: float,
         counters: _Counters,
         system_suffix: str | None = None,
-    ) -> str:
+    ) -> tuple[str, TerminationReason]:
         working_messages = list(messages)
         # The view a control tool may replace. Loop-local, not instance state:
         # one turn's activation must never leak into the next (SPEC-018 §4.10).
         working_tools: Sequence[dict[str, Any]] = self._tools
         working_executor = self._executor
+        # The host block currently installed on the system message, tracked so the
+        # forced answer can be *composed onto* it rather than replacing it
+        # (SPEC-021 §4.2). `_set_system_suffix` installs at most one block, so
+        # handing it the budget policy alone would silently drop the active skill.
+        current_suffix = system_suffix
         if system_suffix:
             self._set_system_suffix(working_messages, system_suffix)
         last_fingerprint: str | None = None
         consecutive_identical_count = 0
         step = 0
+        # Set once, when a budget refuses a call. The next iteration is the forced
+        # answer and is the last one: it declares no tools, so the model cannot
+        # ask for another, and this flag makes the loop ignore one if a caller's
+        # scripted double does anyway.
+        budget_exhausted = False
 
         while True:
             step += 1
@@ -642,13 +697,24 @@ class AgentRunner:
                 )
             )
 
+            if budget_exhausted:
+                # The forced answer. Whatever the model returned, this turn ends
+                # here: the bound on model requests is host arithmetic, never a
+                # matter of the model honouring an instruction (SPEC-021 §3.2).
+                if not text:
+                    raise AgentRuntimeError(
+                        TerminationReason.EMPTY_MODEL_RESPONSE,
+                        "Model returned an empty response.",
+                    )
+                return text, TerminationReason.BUDGET_EXHAUSTED
+
             if not tool_calls:
                 if not text:
                     raise AgentRuntimeError(
                         TerminationReason.EMPTY_MODEL_RESPONSE,
                         "Model returned an empty response.",
                     )
-                return text
+                return text, TerminationReason.FINAL_ANSWER
 
             if len(tool_calls) != 1:
                 self._trace.emit(
@@ -688,6 +754,7 @@ class AgentRunner:
                     turn_id=turn_id,
                     step=step,
                     tool_call_index=counters.tool_calls_executed + 1,
+                    control_call_index=counters.control_calls + 1,
                     tool_name=call.name,
                     arguments_preview=preview,
                     arguments_sha256=digest,
@@ -716,43 +783,68 @@ class AgentRunner:
                 )
                 raise RepeatedToolCallError(message, repeat_count=next_count)
 
+            # A control tool is handled by the host instead of the executor,
+            # because handling it changes this turn's own view. Everything else
+            # about the call — every policy above, the deadline below, the trace
+            # events, the transcript append — is identical (SPEC-018 §4.1).
+            #
+            # Decided here, above the budgets, because which budget a call is
+            # charged against depends on it (SPEC-021 §4.4). The loop still knows
+            # nothing about what any particular tool *means*.
+            is_control = (
+                self._control_handler is not None
+                and call.name in self._control_handler.names
+            )
+            spent, limit, policy = (
+                (counters.control_calls, self._max_control_calls, "control_call_limit")
+                if is_control
+                else (counters.tool_calls_executed, self._max_tool_calls, "tool_call_limit")
+            )
+
             # Enforce the budget before executing: the call that would exceed
-            # the limit is never dispatched (SPEC-010 §2).
-            if counters.tool_calls_executed >= self._max_tool_calls:
-                message = (
-                    f"Agent stopped after {self._max_tool_calls} tool calls "
-                    "without a final answer."
-                )
+            # the limit is never dispatched (SPEC-010 §2). SPEC-021 changes only
+            # what happens *after* that refusal — never the refusal.
+            if spent >= limit:
                 self._trace.emit(
                     build_event(
                         "policy_violation",
                         run_id=self._run_id,
                         turn_id=turn_id,
-                        policy="tool_call_limit",
-                        message=message,
+                        policy=policy,
+                        message=f"Tool call refused: {policy} of {limit} reached.",
                     )
                 )
-                raise AgentRuntimeError(TerminationReason.TOOL_CALL_LIMIT, message)
+                # One final request with no tools declared, so the model can say
+                # what it has and what it could not finish (SPEC-021 §4.1-4.2).
+                # Composed onto whatever host block is already installed, so an
+                # active skill is not silently dropped.
+                budget_exhausted = True
+                working_tools = ()
+                self._set_system_suffix(
+                    working_messages,
+                    f"{current_suffix}\n\n{TOOL_BUDGET_EXHAUSTED_POLICY}"
+                    if current_suffix
+                    else TOOL_BUDGET_EXHAUSTED_POLICY,
+                )
+                continue
 
             last_fingerprint, consecutive_identical_count = fingerprint, next_count
-            counters.tool_calls_executed += 1
-            tool_call_index = counters.tool_calls_executed
+            if is_control:
+                counters.control_calls += 1
+                tool_call_index = counters.control_calls
+            else:
+                counters.tool_calls_executed += 1
+                tool_call_index = counters.tool_calls_executed
 
-            self._renderer.tool_call(call, tool_call_index, self._max_tool_calls)
+            # `[tool N/MAX]` keeps reporting the budget the call is actually
+            # charged against, so the number the user watches is the one that
+            # governs that call (SPEC-021 §4.6).
+            self._renderer.tool_call(call, tool_call_index, limit)
 
             remaining = deadline - self._clock()
             if remaining <= 0:
                 raise TurnTimeoutExceeded("Agent turn exceeded its total time limit.")
             effective_tool_timeout = min(self._tool_execution_timeout_seconds, remaining)
-
-            # A control tool is handled by the host instead of the executor,
-            # because handling it changes this turn's own view. Everything else
-            # about the call — every policy above, the deadline below, the trace
-            # events, the transcript append — is identical (SPEC-018 §4.1).
-            is_control = (
-                self._control_handler is not None
-                and call.name in self._control_handler.names
-            )
 
             self._trace.emit(
                 build_event(
@@ -897,6 +989,7 @@ class AgentRunner:
                 if control.executor is not None:
                     working_executor = control.executor
                 if control.system_suffix is not None:
+                    current_suffix = control.system_suffix
                     self._set_system_suffix(working_messages, control.system_suffix)
 
             # Append the action, the reasoning that chose it, and its

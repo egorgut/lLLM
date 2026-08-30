@@ -360,6 +360,12 @@ class SkillTurnOrchestrator:
             renderer=self._renderer_factory(),
             run_id=self._run_id,
             max_tool_calls=self._max_tool_calls,
+            # One wider than the activation cap, deliberately (SPEC-021 §4.4):
+            # the extra attempt is the one the handler answers with its
+            # recoverable `activation_limit` result, and the attempt after that
+            # is what the loop refuses. Derived here rather than configured
+            # separately, so the two bounds cannot drift apart.
+            max_control_calls=self._max_skill_activations + 1,
             max_identical_tool_calls=self._max_identical_tool_calls,
             model_request_timeout_seconds=self._model_request_timeout_seconds,
             tool_execution_timeout_seconds=self._tool_execution_timeout_seconds,
